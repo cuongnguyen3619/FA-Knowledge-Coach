@@ -1,9 +1,10 @@
-"""FA Knowledge Coach v2 – daily 13 new questions + accumulated remediation."""
+"""FA Knowledge Coach v6 – single submission, batch grading and Sheets writes."""
 import hashlib
 import json
 import random
 import re
 import uuid
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -55,7 +56,7 @@ def book():
 def sheet(name):
     return book().worksheet(name)
 
-@st.cache_data(ttl=45, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def records(name):
     # Shared cache prevents a Google Sheets read on every Streamlit rerun.
     return sheet(name).get_all_records(default_blank="")
@@ -66,7 +67,6 @@ def ensure_tab(name, headers):
     except gspread.WorksheetNotFound:
         ws = book().add_worksheet(title=name, rows=2000, cols=max(20, len(headers)))
         ws.append_row(headers, value_input_option="RAW")
-        records.clear()
         return ws
 
 def question_bank():
@@ -92,12 +92,13 @@ def stable_sample(items, count, student, selected_day, lev):
     seed = int(hashlib.sha256(f"{student}|{selected_day}|{lev}|FA".encode()).hexdigest(), 16)
     return random.Random(seed).sample(sorted(items), count)
 
-def answers_for(student):
-    return [x for x in records("Câu trả lời") if norm(x.get("Họ và tên")) == student and norm(x.get("Question ID"))]
+def answers_for(student, history=None):
+    history = records("Câu trả lời") if history is None else history
+    return [x for x in history if norm(x.get("Họ và tên")) == student and norm(x.get("Question ID"))]
 
-def prior_failures(student, selected_day, bank):
+def prior_failures(student, selected_day, bank, history=None):
     # Most recent graded result per question governs the outstanding remediation queue.
-    history = answers_for(student)
+    history = answers_for(student, history)
     latest = {}
     for x in history:
         qid = norm(x.get("Question ID"))
@@ -113,11 +114,11 @@ def prior_failures(student, selected_day, bank):
         latest[qid] = earned / maximum
     return sorted(qid for qid, ratio in latest.items() if ratio < 0.5)
 
-def build_assignment(student, selected_day, bank):
+def build_assignment(student, selected_day, bank, history=None):
     fresh = []
     missing = {}
-    outstanding = set(prior_failures(student, selected_day, bank))
-    previous = {norm(a.get("Question ID")) for a in answers_for(student)}
+    outstanding = set(prior_failures(student, selected_day, bank, history))
+    previous = {norm(a.get("Question ID")) for a in answers_for(student, history)}
     for lev, required in LEVEL_COUNTS.items():
         # Cumulative bank: Day N may draw from Days 1..N. Do not count
         # unresolved prior failures as new questions; those are review items.
@@ -151,9 +152,9 @@ def build_assignment(student, selected_day, bank):
     random.Random(seed).shuffle(order)
     return order, {}
 
-def assignment_row(student, selected_day):
-    ws = ensure_tab("Bài kiểm tra", ASSIGN_HEADERS)
-    for row in ws.get_all_records(default_blank=""):
+def assignment_row(student, selected_day, assignments=None):
+    assignments = records("Bài kiểm tra") if assignments is None else assignments
+    for row in assignments:
         if norm(row.get("Học viên")) == student and norm(row.get("Ngày")) == str(selected_day):
             return row
     return None
@@ -163,7 +164,6 @@ def start_assignment(student, selected_day, order):
     ensure_tab("Bài kiểm tra", ASSIGN_HEADERS).append_row([
         sid, student, selected_day, "Đang làm", timestamp(), "", json.dumps(order, ensure_ascii=False),
         13, len(order)-13, "", 32, timestamp()], value_input_option="RAW")
-    records.clear()
     return sid
 
 def update_assignment(sid, **values):
@@ -213,14 +213,13 @@ def save_answer(sid, student, selected_day, q, response, score, maximum, feedbac
         "; ".join(feedback.get("missing_points", [])), q.get("Trang nguồn") or q.get("File nguồn"),
         timestamp(), "Pending Trainer review" if review else "Auto graded",
     ], value_input_option="RAW")
-    records.clear()
 
 def previous_results(sid):
     return {norm(x.get("Question ID")): x for x in records("Câu trả lời") if norm(x.get("Session ID")) == sid}
 
-def trainer_warnings(student):
+def trainer_warnings(student, history=None):
     failed = {}
-    for x in answers_for(student):
+    for x in answers_for(student, history):
         try:
             score, maximum = float(x.get("Điểm đạt")), float(x.get("Điểm tối đa"))
             if maximum <= 0 or norm(x.get("Trạng thái kiểm duyệt")).lower().startswith("pending"):
@@ -315,18 +314,101 @@ def show_feedback(q, result):
             st.caption("Chưa có đáp án tham khảo.")
     st.caption("Đáp án tham khảo dùng để học tập; các cách diễn đạt tương đương vẫn được chấp nhận.")
 
+
+# API calls below are limited to initial loading and final batch commit.
+# Cache reads are shared across users. Do not invalidate global caches after every submission.
+def retry_sheets(action, attempts=5):
+    for i in range(attempts):
+        try:
+            return action()
+        except gspread.exceptions.APIError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in (429, 500, 502, 503, 504) or i == attempts - 1:
+                raise
+            time.sleep(min(2 ** i + random.random(), 16))
+
+def get_initial_data():
+    return (retry_sheets(lambda: records("Học viên")),
+            retry_sheets(question_bank),
+            retry_sheets(lambda: records("Câu trả lời")),
+            retry_sheets(lambda: records("Bài kiểm tra")))
+
+def grade_submission(student, selected_day, order, bank, responses, sid):
+    output = []
+    for item in order:
+        qid = item["id"]
+        q = bank[qid]
+        answer = responses.get(qid, "")
+        maximum = POINTS[level(q)]
+        if not answer.strip():
+            score, fb, needs_review = 0, {"feedback": "Không trả lời.", "correct_points": [], "missing_points": ["Chưa trả lời câu hỏi"], "incorrect_points": []}, False
+        elif level(q) == 1:
+            selected = sorted([x for x in answer.split(",") if x])
+            correct = selected == sorted(q["_keys"])
+            score = maximum if correct else 0
+            fb = {"feedback": "Chính xác." if correct else "Chưa chính xác.", "correct_points": ["Đúng đáp án"] if correct else [], "missing_points": [] if correct else ["Cần ôn tập câu hỏi"], "incorrect_points": []}
+            needs_review = False
+        else:
+            score, fb = grade_open(q, answer, maximum)
+            needs_review = bool(fb.get("needs_review", False))
+        output.append({"Session ID": sid, "Họ và tên": student, "Ngày": selected_day,
+                       "Question ID": qid, "Ngày nội dung": q.get("Ngày nội dung"), "Module": q.get("Module"),
+                       "Level": level(q), "Câu hỏi": q.get("Câu hỏi"), "Câu trả lời": answer,
+                       "Đáp án tham khảo": q.get("Đáp án tham khảo") or q.get("Đáp án đề gốc"),
+                       "Đánh giá từ Agent": json.dumps(fb, ensure_ascii=False), "Điểm đạt": score,
+                       "Điểm tối đa": maximum, "Kết quả": "Cần Trainer kiểm duyệt" if needs_review else ("Đạt" if score/maximum >= 0.5 else "Chưa đạt"),
+                       "Nội dung cần ôn": "; ".join(fb.get("missing_points", [])),
+                       "Trang nguồn": q.get("Trang nguồn") or q.get("File nguồn"),
+                       "Thời gian": timestamp(), "Trạng thái kiểm duyệt": "Pending Trainer review" if needs_review else "Auto graded",
+                       "review": item.get("review", False)})
+    return output
+
+def commit_results(sid, student, selected_day, order, results, students):
+    # Idempotency check prevents duplicate answer rows after retry/reconnect.
+    # For strict concurrent idempotency use a transactional database.
+    ws = sheet("Câu trả lời")
+    existing = retry_sheets(lambda: ws.get_all_values())
+    headers = existing[0] if existing else []
+    if not headers:
+        raise RuntimeError("Tab Câu trả lời thiếu hàng tiêu đề")
+    if "Session ID" not in headers:
+        raise RuntimeError("Tab Câu trả lời thiếu cột Session ID")
+    sid_col = headers.index("Session ID")
+    already = any(len(row) > sid_col and row[sid_col] == sid for row in existing[1:])
+    if not already:
+        # Use sheet header mapping, preserving existing column layout.
+        data = [[r.get(h, "") for h in headers] for r in results]
+        retry_sheets(lambda: ws.append_rows(data, value_input_option="RAW"))
+    fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
+    aws = sheet("Bài kiểm tra")
+    assignment_rows = retry_sheets(lambda: aws.get_all_values())
+    idx = next((i for i, row in enumerate(assignment_rows[1:], 2) if row and row[0] == sid), None)
+    if idx is None:
+        # Single append of assignment metadata after grading.
+        retry_sheets(lambda: aws.append_row([sid, student, selected_day, "Hoàn thành", timestamp(), timestamp(), json.dumps(order, ensure_ascii=False), 13, len(order)-13, fresh_score, 32, timestamp()], value_input_option="RAW"))
+    else:
+        cols = {name: i+1 for i, name in enumerate(ASSIGN_HEADERS)}
+        updates = [{"range": gspread.utils.rowcol_to_a1(idx, cols[k]), "values": [[v]]} for k, v in {"Trạng thái":"Hoàn thành", "Kết thúc":timestamp(), "Điểm mới":fresh_score, "Cập nhật lúc":timestamp()}.items()]
+        retry_sheets(lambda: aws.batch_update(updates, value_input_option="RAW"))
+    sws = sheet("Lượt đánh giá")
+    summary = retry_sheets(lambda: sws.get_all_values())
+    if not any(row and row[0] == sid for row in summary[1:]):
+        dealer = next((x.get("Đại lý", "") for x in students if norm(x.get("Họ và tên")) == student), "")
+        retry_sheets(lambda: sws.append_row([sid, student, dealer, selected_day, 1, timestamp(), timestamp(), len(order), fresh_score, 32, round(fresh_score / 32 * 100, 2), "", "", "", "", "13 câu mới; câu ôn tập không tính điểm", "", "Completed"], value_input_option="RAW"))
+    return fresh_score
+
+# Avoid loading data on every widget change: the full assessment uses one st.form.
 try:
-    students = records("Học viên")
-    bank = question_bank()
+    students, bank, history, assignments = get_initial_data()
 except Exception as exc:
-    st.error("Không đọc được Google Sheets. Kiểm tra Secrets và quyền truy cập.")
+    st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
     st.exception(exc)
     st.stop()
 
 with st.sidebar:
     mode = st.radio("Chế độ", ["Học viên", "Trainer – Xem trước", "Trainer – Cảnh báo"])
     selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
-    st.caption("13 câu mới/ngày · 32 điểm tối đa. Câu ôn tập không cộng điểm.")
+    st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
 
 names = [norm(x.get("Họ và tên")) for x in students if norm(x.get("Họ và tên"))]
 if not names:
@@ -335,136 +417,123 @@ if not names:
 student = st.selectbox("Học viên", names)
 
 if mode.startswith("Trainer"):
-    # A separate password prevents accidental disclosure in the pilot; deploy behind SSO for production.
     password = st.secrets.get("TRAINER_PASSWORD")
     if not password:
-        st.error("Cần đặt TRAINER_PASSWORD trong Streamlit Secrets để sử dụng chế độ Trainer.")
+        st.error("Cần đặt TRAINER_PASSWORD trong Secrets")
         st.stop()
-    entered = st.text_input("Mật khẩu Trainer", type="password")
-    if entered != password:
+    if st.text_input("Mật khẩu Trainer", type="password") != password:
         st.stop()
     if mode == "Trainer – Cảnh báo":
-        warnings = trainer_warnings(student)
+        warnings = trainer_warnings(student, history)
         st.metric("Câu có ít nhất 2 lần không đạt", len(warnings))
         for qid, attempts in warnings.items():
-            st.warning(f"{qid} · {len(attempts)} lần dưới 50%")
+            st.warning(f"{qid}: {len(attempts)} lần dưới 50%")
             st.write(bank.get(qid, {}).get("Câu hỏi", ""))
-            st.caption("Điểm các lần: " + " → ".join(f"{float(a['Điểm đạt'])/float(a['Điểm tối đa']):.0%}" for a in attempts))
-        if not warnings:
-            st.success("Không có cảnh báo cho học viên này")
         st.stop()
-    st.subheader(f"Xem trước – Ngày {selected_day}")
     for lev, count in LEVEL_COUNTS.items():
-        available = [q for q in bank.values() if 1 <= day(q) <= selected_day and level(q) == lev]
-        valid = [q for q in available if approved(q) and (lev == 1 or norm(q.get("Đáp án tham khảo")))]
-        st.write(f"**Level {lev}: {len(valid)}/{count} câu hợp lệ (tích lũy Ngày 1–{selected_day})**" + (" · L1 không cần Approved" if lev == 1 else " · cần Approved và đáp án tham khảo"))
-        for q in available:
-            with st.expander(f"{q['Question ID']} · {q['Câu hỏi'][:90]} {'✓' if approved(q) else '(Chờ duyệt)'}"):
-                st.write(q["Câu hỏi"])
-                if lev == 1:
-                    st.write(q.get("_choices", {}))
-                    st.write("Đáp án:", ", ".join(q.get("_keys", [])))
-                else:
-                    st.write("Đáp án tham khảo:", q.get("Đáp án tham khảo", ""))
-
+        eligible = [q for q in bank.values() if 1 <= day(q) <= selected_day and level(q) == lev and approved(q) and (lev == 1 or norm(q.get("Đáp án tham khảo")))]
+        st.write(f"Level {lev}: {len(eligible)} câu hợp lệ / cần {count}")
     st.stop()
 
 st.subheader(f"Bài đánh giá – Ngày {selected_day}")
-existing = assignment_row(student, selected_day)
-if not existing:
-    proposed, shortage = build_assignment(student, selected_day, bank)
-    if shortage:
-        st.error("Chưa đủ câu hỏi hợp lệ để tạo bài kiểm tra đúng cấu trúc.")
-        for lev, (actual, required) in shortage.items():
-            st.write(f"Level {lev}: có {actual}/{required} câu hợp lệ từ Ngày 1–{selected_day}" + (" (L1 không cần Approved)" if lev == 1 else " (cần Approved và đáp án tham khảo)"))
-        st.caption("Trainer có thể xem trước câu chưa duyệt trong chế độ Trainer.")
+key = f"exam_v6:{student}:{selected_day}"
+if key not in st.session_state:
+    existing = assignment_row(student, selected_day, assignments)
+    if existing and norm(existing.get("Trạng thái")) == "Hoàn thành":
+        sid = norm(existing.get("Session ID"))
+        order = json.loads(existing.get("Danh sách câu JSON") or "[]")
+        completed = {norm(x.get("Question ID")): x for x in history if norm(x.get("Session ID")) == sid}
+        st.success("Bài kiểm tra đã hoàn thành và lưu kết quả.")
+        if completed:
+            show_final_report(order, completed, bank)
+            for i, item in enumerate(order, 1):
+                if item["id"] in completed and item["id"] in bank:
+                    with st.expander(f"Câu {i} – Level {level(bank[item['id']])}"):
+                        st.write(bank[item["id"]].get("Câu hỏi", ""))
+                        show_feedback(bank[item["id"]], completed[item["id"]])
         st.stop()
-    st.write(f"13 câu mới + {len(proposed)-13} câu ôn tập · Điểm mới tối đa 32")
+    proposed, shortage = build_assignment(student, selected_day, bank, history)
+    if shortage:
+        st.error("Không đủ câu hỏi hợp lệ để tạo bài kiểm tra")
+        for lev, (actual, required) in shortage.items():
+            st.write(f"Level {lev}: {actual}/{required}")
+        st.stop()
     if st.button("Bắt đầu bài kiểm tra", type="primary"):
+        st.session_state[key] = {"sid": str(uuid.uuid4()), "order": proposed, "status": "taking", "results": None, "responses": None}
+        st.rerun()
+    st.stop()
+
+exam = st.session_state[key]
+order = exam["order"]
+if exam["status"] == "taking":
+    st.info(f"{len(order)} câu hỏi: 13 câu mới + {len(order)-13} câu ôn tập. Chỉ nộp bài một lần.")
+    with st.form(f"assessment:{key}"):
+        responses = {}
+        for i, item in enumerate(order, 1):
+            q = bank.get(item["id"])
+            if not q:
+                st.error(f"Thiếu câu hỏi {item['id']} trong ngân hàng")
+                st.stop()
+            lev = level(q)
+            st.markdown(f"### Câu {i}/{len(order)} · Level {lev} · {'Ôn tập' if item['review'] else str(POINTS[lev])+' điểm'}")
+            st.write(q.get("Câu hỏi", ""))
+            if lev == 1:
+                # Shuffle option order without changing the underlying answer keys.
+                keys = sorted(q["_choices"])
+                seed = int(hashlib.sha256(f"{exam['sid']}|{item['id']}".encode()).hexdigest(), 16)
+                random.Random(seed).shuffle(keys)
+                if len(q["_keys"]) > 1:
+                    selected = [k for k in keys if st.checkbox(f"{k}. {q['_choices'][k]}", key=f"{key}:{item['id']}:{k}")]
+                else:
+                    selected = st.radio("Chọn đáp án", keys, index=None, key=f"{key}:{item['id']}", format_func=lambda k: f"{k}. {q['_choices'][k]}")
+                    selected = [selected] if selected else []
+                responses[item["id"]] = ",".join(sorted(selected))
+            else:
+                responses[item["id"]] = st.text_area("Câu trả lời", key=f"{key}:{item['id']}", height=120)
+        submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
+    if submitted:
+        if any(not responses.get(item["id"], "").strip() for item in order):
+            st.warning("Bạn còn câu chưa trả lời. Vui lòng hoàn thành trước khi nộp.")
+            st.stop()
+        exam["responses"] = responses
+        exam["status"] = "grading"
+        st.rerun()
+    st.stop()
+
+if exam["status"] == "grading":
+    with st.spinner("Đang chấm điểm và tạo nhận xét. Vui lòng không tải lại trang..."):
         try:
-            start_assignment(student, selected_day, proposed)
+            exam["results"] = grade_submission(student, selected_day, order, bank, exam["responses"], exam["sid"])
+            exam["status"] = "graded"
             st.rerun()
         except Exception as exc:
-            st.error(f"Không lưu được bài kiểm tra: {exc}")
+            st.error(f"Chấm điểm chưa hoàn tất: {exc}")
+            st.warning("Chưa ghi kết quả lên Google Sheets. Bấm thử lại để chấm lại; không đóng trang.")
+            if st.button("Thử chấm lại"):
+                st.rerun()
     st.stop()
 
-sid = norm(existing["Session ID"])
-order = json.loads(existing["Danh sách câu JSON"])
-completed = previous_results(sid)
-if norm(existing.get("Trạng thái")) == "Hoàn thành":
-    st.success("Bạn đã hoàn thành bài kiểm tra! Hệ thống đã ghi nhận câu trả lời của bạn. Xin cảm ơn bạn đã tham gia đánh giá kiến thức Ford Academy.")
-    show_final_report(order, completed, bank)
-    st.stop()
+results = exam["results"] or []
+completed = {r["Question ID"]: r for r in results}
+st.success("Đã chấm bài. Kết quả và nhận xét:")
+show_final_report(order, completed, bank)
+for i, item in enumerate(order, 1):
+    q = bank[item["id"]]
+    with st.expander(f"Câu {i} – Level {level(q)} · {completed[item['id']]['Điểm đạt']}/{POINTS[level(q)]} điểm"):
+        st.write(q.get("Câu hỏi", ""))
+        st.write("**Câu trả lời của bạn:**", completed[item["id"]].get("Câu trả lời", ""))
+        show_feedback(q, completed[item["id"]])
 
-next_item = next((item for item in order if item["id"] not in completed), None)
-if next_item is None:
-    fresh_score = sum(float(completed[item["id"]].get("Điểm đạt") or 0) for item in order if not item["review"])
-    try:
-        update_assignment(sid, **{"Trạng thái": "Hoàn thành", "Kết thúc": timestamp(), "Điểm mới": fresh_score, "Cập nhật lúc": timestamp()})
-        # Append one summary record, preserving the existing 18-column schema.
-        sheet("Lượt đánh giá").append_row([
-            sid, student, next((x.get("Đại lý", "") for x in students if norm(x.get("Họ và tên")) == student), ""),
-            selected_day, 1, existing.get("Bắt đầu", ""), timestamp(), len(order), fresh_score, 32,
-            round(fresh_score / 32 * 100, 2), "", "", "", "", "13 câu mới; câu ôn tập không tính điểm", "", "Completed"
-        ], value_input_option="RAW")
-        st.rerun()
-    except Exception as exc:
-        st.error(f"Chưa chốt được bài kiểm tra: {exc}")
-    st.stop()
-
-index = next(i for i, item in enumerate(order) if item["id"] == next_item["id"])
-q = bank.get(next_item["id"])
-if not q:
-    st.error("Câu hỏi đã bị xóa khỏi Question Bank. Trainer cần khôi phục câu trước khi tiếp tục.")
-    st.stop()
-st.progress(len(completed) / len(order))
-st.write(f"**Câu {index+1}/{len(order)}** · Level {level(q)} · {'Ôn tập' if next_item['review'] else str(POINTS[level(q)])+' điểm'}")
-st.write(q.get("Câu hỏi", ""))
-
-# Submitted answer remains locked while feedback is shown; resuming after refresh reads Google Sheets.
-feedback_key = f"feedback:{sid}:{next_item['id']}"
-if feedback_key in st.session_state:
-    show_feedback(q, st.session_state[feedback_key])
-    if st.button("Câu tiếp theo", type="primary"):
-        del st.session_state[feedback_key]
-        st.rerun()
-    st.stop()
-
-with st.form(f"form:{sid}:{next_item['id']}"):
-    if level(q) == 1:
-        keys = list(q["_choices"])
-        if len(q["_keys"]) > 1:
-            st.caption("Chọn tất cả phương án đúng")
-            picks = [k for k in keys if st.checkbox(f"{k}. {q['_choices'][k]}")]
-        else:
-            picked = st.radio("Chọn đáp án", keys, index=None, format_func=lambda k: f"{k}. {q['_choices'][k]}")
-            picks = [picked] if picked else []
-        answer = ",".join(sorted(picks))
-    else:
-        answer = st.text_area("Câu trả lời", height=160)
-    sent = st.form_submit_button("Gửi đáp án", type="primary")
-if sent:
-    if not answer.strip():
-        st.warning("Hãy nhập hoặc chọn đáp án trước khi gửi.")
-        st.stop()
-    maximum = POINTS[level(q)]
-    try:
-        if level(q) == 1:
-            correct = sorted(picks) == q["_keys"]
-            score = maximum if correct else 0
-            feedback = {"feedback": "Chính xác." if correct else "Chưa chính xác; câu hỏi sẽ xuất hiện trong phần ôn tập.",
-                        "correct_points": ["Đã chọn đúng phương án."] if correct else [],
-                        "missing_points": [] if correct else ["Cần ôn tập nội dung câu hỏi."], "incorrect_points": []}
-            needs_review = False
-        else:
-            score, feedback = grade_open(q, answer, maximum)
-            needs_review = bool(feedback.get("needs_review", False))
-        save_answer(sid, student, selected_day, q, answer, score, maximum, feedback, needs_review)
-        st.session_state[feedback_key] = {
-            "Điểm đạt": score, "Điểm tối đa": maximum,
-            "Đánh giá từ Agent": json.dumps(feedback, ensure_ascii=False),
-            "Trạng thái kiểm duyệt": "Pending Trainer review" if needs_review else "Auto graded",
-        }
-        st.rerun()
-    except Exception as exc:
-        st.error(f"Chưa chấm hoặc lưu được câu trả lời. Có thể thử gửi lại: {exc}")
+if exam["status"] != "saved":
+    st.warning("Kết quả đã chấm nhưng chưa xác nhận lưu Google Sheets. Không đóng trang cho đến khi lưu thành công.")
+    if st.button("Lưu toàn bộ kết quả vào Google Sheets", type="primary"):
+        try:
+            with st.spinner("Đang lưu kết quả theo lô..."):
+                commit_results(exam["sid"], student, selected_day, order, results, students)
+            exam["status"] = "saved"
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Lưu chưa hoàn tất: {exc}")
+            st.info("Kết quả vẫn giữ trong phiên hiện tại. Có thể bấm lưu lại; hệ thống kiểm tra Session ID để hạn chế ghi trùng.")
+else:
+    st.success("Đã lưu kết quả lên Google Sheets thành công.")
