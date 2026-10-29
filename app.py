@@ -55,7 +55,9 @@ def book():
 def sheet(name):
     return book().worksheet(name)
 
+@st.cache_data(ttl=45, show_spinner=False)
 def records(name):
+    # Shared cache prevents a Google Sheets read on every Streamlit rerun.
     return sheet(name).get_all_records(default_blank="")
 
 def ensure_tab(name, headers):
@@ -64,6 +66,7 @@ def ensure_tab(name, headers):
     except gspread.WorksheetNotFound:
         ws = book().add_worksheet(title=name, rows=2000, cols=max(20, len(headers)))
         ws.append_row(headers, value_input_option="RAW")
+        records.clear()
         return ws
 
 def question_bank():
@@ -113,11 +116,11 @@ def prior_failures(student, selected_day, bank):
 def build_assignment(student, selected_day, bank):
     fresh = []
     missing = {}
+    outstanding = set(prior_failures(student, selected_day, bank))
+    previous = {norm(a.get("Question ID")) for a in answers_for(student)}
     for lev, required in LEVEL_COUNTS.items():
         # Cumulative bank: Day N may draw from Days 1..N. Do not count
         # unresolved prior failures as new questions; those are review items.
-        outstanding = set(prior_failures(student, selected_day, bank))
-        previous = {norm(a.get("Question ID")) for a in answers_for(student)}
         eligible = [qid for qid, q in bank.items()
                     if approved(q) and 1 <= day(q) <= selected_day
                     and level(q) == lev and qid not in outstanding
@@ -142,7 +145,7 @@ def build_assignment(student, selected_day, bank):
             fresh.extend(chosen)
     if missing:
         return None, missing
-    repeat = [qid for qid in prior_failures(student, selected_day, bank) if qid not in fresh]
+    repeat = [qid for qid in sorted(outstanding) if qid not in fresh]
     order = [{"id": qid, "review": False} for qid in fresh] + [{"id": qid, "review": True} for qid in repeat]
     seed = int(hashlib.sha256(f"{student}|{selected_day}|order".encode()).hexdigest(), 16)
     random.Random(seed).shuffle(order)
@@ -160,6 +163,7 @@ def start_assignment(student, selected_day, order):
     ensure_tab("Bài kiểm tra", ASSIGN_HEADERS).append_row([
         sid, student, selected_day, "Đang làm", timestamp(), "", json.dumps(order, ensure_ascii=False),
         13, len(order)-13, "", 32, timestamp()], value_input_option="RAW")
+    records.clear()
     return sid
 
 def update_assignment(sid, **values):
@@ -209,6 +213,7 @@ def save_answer(sid, student, selected_day, q, response, score, maximum, feedbac
         "; ".join(feedback.get("missing_points", [])), q.get("Trang nguồn") or q.get("File nguồn"),
         timestamp(), "Pending Trainer review" if review else "Auto graded",
     ], value_input_option="RAW")
+    records.clear()
 
 def previous_results(sid):
     return {norm(x.get("Question ID")): x for x in records("Câu trả lời") if norm(x.get("Session ID")) == sid}
