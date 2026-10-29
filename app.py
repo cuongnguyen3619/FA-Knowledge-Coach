@@ -43,12 +43,9 @@ def day(row):
         return 0
 
 def approved(row):
-      # Level 1: không yêu cầu Approved
-    if level(row) == 1:
-        return True
-
-    # Level 2, 3, 4: bắt buộc Approved
-    return norm(row.get("Trạng thái duyệt")).casefold() in APPROVED
+    # Level 1 MCQs are eligible regardless of approval status.
+    # Levels 2–4 require Trainer approval.
+    return level(row) == 1 or norm(row.get("Trạng thái duyệt")).casefold() in APPROVED
 
 @st.cache_resource(show_spinner=False)
 def book():
@@ -117,11 +114,32 @@ def build_assignment(student, selected_day, bank):
     fresh = []
     missing = {}
     for lev, required in LEVEL_COUNTS.items():
-        eligible = [qid for qid, q in bank.items() if approved(q) and day(q) == selected_day and level(q) == lev]
-        if len(eligible) < required:
-            missing[lev] = (len(eligible), required)
+        # Cumulative bank: Day N may draw from Days 1..N. Do not count
+        # unresolved prior failures as new questions; those are review items.
+        outstanding = set(prior_failures(student, selected_day, bank))
+        previous = {norm(a.get("Question ID")) for a in answers_for(student)}
+        eligible = [qid for qid, q in bank.items()
+                    if approved(q) and 1 <= day(q) <= selected_day
+                    and level(q) == lev and qid not in outstanding
+                    and (lev == 1 or norm(q.get("Đáp án tham khảo")))]
+        never_seen = [qid for qid in eligible if qid not in previous]
+        # Prefer content from the selected day, then earlier days.
+        never_seen.sort(key=lambda qid: (-day(bank[qid]), qid))
+        chosen = []
+        for source in (never_seen, [qid for qid in eligible if qid in previous]):
+            for d in range(selected_day, 0, -1):
+                group = [qid for qid in source if day(bank[qid]) == d and qid not in chosen]
+                take = min(required-len(chosen), len(group))
+                if take:
+                    chosen.extend(stable_sample(group, take, student, selected_day, lev))
+                if len(chosen) == required:
+                    break
+            if len(chosen) == required:
+                break
+        if len(chosen) < required:
+            missing[lev] = (len(chosen), required)
         else:
-            fresh += stable_sample(eligible, required, student, selected_day, lev)
+            fresh.extend(chosen)
     if missing:
         return None, missing
     repeat = [qid for qid in prior_failures(student, selected_day, bank) if qid not in fresh]
@@ -166,15 +184,16 @@ def grade_open(question, answer, max_points):
         temperature=0, response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": (
-                "Bạn là giám khảo Ford Academy. Chỉ dựa trên đáp án tham khảo và rubric đã duyệt. "
-                "Đánh giá tính chính xác và độ bao phủ các ý chính; không tự bổ sung dữ kiện kỹ thuật. "
+                "Bạn là giám khảo Ford Academy. Chỉ dựa trên câu hỏi và đáp án tham khảo của Trainer. "
+                "Đánh giá các ý đúng, thiếu, sai và mức độ hoàn thành; chấp nhận cách diễn đạt tương đương. "
+                "Không đòi hỏi rubric, không thêm tiêu chí hoặc dữ kiện ngoài đáp án tham khảo. "
                 "Trả JSON: ratio (0..1), correct_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
                 "Nếu nguồn không đủ hoặc mơ hồ, needs_review=true."
             )},
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
-                "rubric": question.get("Rubric"), "answer": answer
+                "answer": answer
             }, ensure_ascii=False)}
         ])
     data = json.loads(completion.choices[0].message.content)
@@ -268,8 +287,9 @@ if mode.startswith("Trainer"):
         st.stop()
     st.subheader(f"Xem trước – Ngày {selected_day}")
     for lev, count in LEVEL_COUNTS.items():
-        available = [q for q in bank.values() if day(q) == selected_day and level(q) == lev]
-        st.write(f"**Level {lev}: {len([q for q in available if approved(q)])}/{count} câu đã duyệt cần thiết**")
+        available = [q for q in bank.values() if 1 <= day(q) <= selected_day and level(q) == lev]
+        valid = [q for q in available if approved(q) and (lev == 1 or norm(q.get("Đáp án tham khảo")))]
+        st.write(f"**Level {lev}: {len(valid)}/{count} câu hợp lệ (tích lũy Ngày 1–{selected_day})**" + (" · L1 không cần Approved" if lev == 1 else " · cần Approved và đáp án tham khảo"))
         for q in available:
             with st.expander(f"{q['Question ID']} · {q['Câu hỏi'][:90]} {'✓' if approved(q) else '(Chờ duyệt)'}"):
                 st.write(q["Câu hỏi"])
@@ -278,7 +298,7 @@ if mode.startswith("Trainer"):
                     st.write("Đáp án:", ", ".join(q.get("_keys", [])))
                 else:
                     st.write("Đáp án tham khảo:", q.get("Đáp án tham khảo", ""))
-                    st.write("Rubric:", q.get("Rubric", ""))
+
     st.stop()
 
 st.subheader(f"Bài đánh giá – Ngày {selected_day}")
@@ -286,9 +306,9 @@ existing = assignment_row(student, selected_day)
 if not existing:
     proposed, shortage = build_assignment(student, selected_day, bank)
     if shortage:
-        st.error("Chưa đủ câu hỏi đã duyệt để tạo bài kiểm tra đúng cấu trúc.")
+        st.error("Chưa đủ câu hỏi hợp lệ để tạo bài kiểm tra đúng cấu trúc.")
         for lev, (actual, required) in shortage.items():
-            st.write(f"Level {lev}: có {actual}/{required} câu Approved")
+            st.write(f"Level {lev}: có {actual}/{required} câu hợp lệ từ Ngày 1–{selected_day}" + (" (L1 không cần Approved)" if lev == 1 else " (cần Approved và đáp án tham khảo)"))
         st.caption("Trainer có thể xem trước câu chưa duyệt trong chế độ Trainer.")
         st.stop()
     st.write(f"13 câu mới + {len(proposed)-13} câu ôn tập · Điểm mới tối đa 32")
