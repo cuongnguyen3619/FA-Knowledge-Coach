@@ -231,6 +231,58 @@ def trainer_warnings(student):
             failed.setdefault(norm(x.get("Question ID")), []).append(x)
     return {qid: attempts for qid, attempts in failed.items() if len(attempts) >= 2}
 
+def show_final_report(order, completed, bank):
+    """Evidence-based end-of-test feedback; no extra Google Sheets calls or API cost."""
+    fresh = [(bank.get(item["id"], {}), completed[item["id"]]) for item in order
+             if not item.get("review") and item["id"] in completed]
+    if not fresh:
+        st.info("Chưa có dữ liệu chấm điểm để lập nhận xét.")
+        return
+    total = sum(float(a.get("Điểm đạt") or 0) for _, a in fresh)
+    st.metric("Tổng điểm bài đánh giá", f"{total:g}/32", f"{total / 32:.0%}")
+    st.subheader("Đánh giá theo cấp độ")
+    weak = []
+    strengths = []
+    for lev in (1, 2, 3, 4):
+        rows = [(q, a) for q, a in fresh if level(q) == lev]
+        got = sum(float(a.get("Điểm đạt") or 0) for _, a in rows)
+        maximum = sum(float(a.get("Điểm tối đa") or POINTS[lev]) for _, a in rows)
+        ratio = got / maximum if maximum else 0
+        st.write(f"**Level {lev}: {got:g}/{maximum:g} điểm ({ratio:.0%})**")
+        if ratio >= .8:
+            strengths.append(f"Level {lev}")
+        elif ratio < .5:
+            weak.append(f"Level {lev}")
+    st.subheader("Nhận xét và lời khuyên")
+    if strengths:
+        st.success("Kết quả tốt ở " + ", ".join(strengths) + ". Hãy tiếp tục duy trì và vận dụng vào tình huống tư vấn.")
+    if weak:
+        st.warning("Cần ưu tiên củng cố " + ", ".join(weak) + ".")
+    missing = []
+    incorrect = []
+    for q, a in fresh:
+        try:
+            fb = json.loads(a.get("Đánh giá từ Agent") or "{}")
+        except (ValueError, TypeError):
+            fb = {}
+        for x in fb.get("missing_points", []):
+            if x and x not in missing:
+                missing.append(x)
+        for x in fb.get("incorrect_points", []):
+            if x and x not in incorrect:
+                incorrect.append(x)
+    if missing or incorrect:
+        st.markdown("**Các nội dung cần ôn tập (theo kết quả chấm):**")
+        for x in (missing + incorrect)[:8]:
+            st.write("•", x)
+    else:
+        st.write("Chưa ghi nhận ý thiếu hoặc sai cụ thể từ phần chấm tự động. Hãy xem lại các câu có điểm thấp.")
+    st.markdown("**3 lời khuyên:**")
+    st.write("1. Ôn lại những câu có điểm dưới 50%, tập trung vào các ý còn thiếu đã được chỉ ra.")
+    st.write("2. Tự giải thích lại kiến thức bằng ngôn ngữ của mình, sau đó đối chiếu tài liệu đào tạo.")
+    st.write("3. Luyện vận dụng kiến thức vào tình huống tư vấn khách hàng trước bài đánh giá tiếp theo.")
+    st.caption("Nhận xét dựa trên điểm và dữ liệu chấm đã lưu; không dùng tiêu chí ngoài đáp án tham khảo.")
+
 def show_feedback(q, result):
     try:
         feedback = json.loads(result.get("Đánh giá từ Agent") or "{}")
@@ -250,7 +302,18 @@ def show_feedback(q, result):
                 st.write("•", item)
     if feedback.get("feedback"):
         st.info(feedback["feedback"])
-    # Never display the answer key during a live student assessment.
+    st.markdown("**Đáp án / gợi ý trả lời:**")
+    if level(q) == 1:
+        correct_keys = q.get("_keys", [])
+        for key in correct_keys:
+            st.write(f"**{key}.** {q.get('_choices', {}).get(key, '')}")
+    else:
+        reference = norm(q.get("Đáp án tham khảo"))
+        if reference:
+            st.write(reference)
+        else:
+            st.caption("Chưa có đáp án tham khảo.")
+    st.caption("Đáp án tham khảo dùng để học tập; các cách diễn đạt tương đương vẫn được chấp nhận.")
 
 try:
     students = records("Học viên")
@@ -329,7 +392,8 @@ sid = norm(existing["Session ID"])
 order = json.loads(existing["Danh sách câu JSON"])
 completed = previous_results(sid)
 if norm(existing.get("Trạng thái")) == "Hoàn thành":
-    st.success("Bạn đã hoàn thành bài kiểm tra! Xin cảm ơn bạn đã tham gia đánh giá kiến thức Ford Academy.")
+    st.success("Bạn đã hoàn thành bài kiểm tra! Hệ thống đã ghi nhận câu trả lời của bạn. Xin cảm ơn bạn đã tham gia đánh giá kiến thức Ford Academy.")
+    show_final_report(order, completed, bank)
     st.stop()
 
 next_item = next((item for item in order if item["id"] not in completed), None)
