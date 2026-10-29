@@ -43,6 +43,11 @@ def day(row):
         return 0
 
 def approved(row):
+      # Level 1: không yêu cầu Approved
+    if level(row) == 1:
+        return True
+
+    # Level 2, 3, 4: bắt buộc Approved
     return norm(row.get("Trạng thái duyệt")).casefold() in APPROVED
 
 @st.cache_resource(show_spinner=False)
