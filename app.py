@@ -24,6 +24,27 @@ WARN_HEADERS = ["Học viên", "Question ID", "Số lần không đạt", "Đi�
 st.set_page_config(page_title="FA Knowledge Coach", page_icon="🚙", layout="centered")
 st.title("FA Knowledge Coach")
 st.caption("Ford Academy Vietnam · Daily Assessment")
+st.markdown("""<style>
+/* Distinct readable surfaces for questions, learner responses, and feedback */
+.fa-panel {border:1px solid #bac8d8;border-left:5px solid #1459a4;border-radius:10px;padding:14px 17px;margin:10px 0 14px;background:#edf4fc;color:#142c45;line-height:1.6}
+.fa-panel strong {color:#0c3768}
+.fa-answer {background:#f2f5f9;border-left-color:#65758a;color:#172b40}
+.fa-feedback {background:#eaf7f1;border-left-color:#16784b;color:#153e30}
+.fa-reference {background:#fff8e8;border-left-color:#ae7414;color:#4c3410}
+@media (prefers-color-scheme: dark) {
+.fa-panel {background:#152a42;border-color:#425c79;color:#e8f2ff}
+.fa-panel strong {color:#b8dcff}
+.fa-answer {background:#26313f;color:#f0f4fa}
+.fa-feedback {background:#173b30;color:#e0faec}
+.fa-reference {background:#45361b;color:#fff0ca}
+}
+</style>""", unsafe_allow_html=True)
+
+def panel(label, content, kind="question"):
+    import html
+    css = {"question":"fa-panel", "answer":"fa-panel fa-answer", "feedback":"fa-panel fa-feedback", "reference":"fa-panel fa-reference"}[kind]
+    st.markdown(f'<div class="{css}"><strong>{html.escape(str(label))}</strong><div style="white-space:pre-wrap;margin-top:6px">{html.escape(str(content or "—"))}</div></div>', unsafe_allow_html=True)
+
 
 def timestamp():
     return datetime.now(TZ).isoformat(timespec="seconds")
@@ -289,30 +310,24 @@ def show_feedback(q, result):
         feedback = {}
     maximum = float(result.get("Điểm tối đa") or 1)
     score = float(result.get("Điểm đạt") or 0)
-    st.metric("Kết quả", f"{score:g}/{maximum:g}")
+    if level(q) == 1:
+        panel("Kết quả trắc nghiệm", "ĐÚNG" if score == maximum else "SAI", "feedback")
+        correct_keys = q.get("_keys", [])
+        correct_answer = "\n".join(f"{k}. {q.get('_choices', {}).get(k, '')}" for k in correct_keys)
+        panel("Đáp án đúng", correct_answer, "reference")
+        return
+    st.write(f"**Điểm: {score:g}/{maximum:g}**")
     if norm(result.get("Trạng thái kiểm duyệt")).lower().startswith("pending"):
-        st.warning("Chờ Trainer kiểm duyệt; chưa tính vào cảnh báo.")
-    else:
-        (st.success if score / maximum >= 0.5 else st.warning)("Đạt ngưỡng 50%" if score / maximum >= 0.5 else "Chưa đạt 50% – sẽ được ôn tập")
+        st.warning("Kết quả cần Trainer kiểm duyệt.")
     for title, field in [("Các ý đúng", "correct_points"), ("Các ý còn thiếu", "missing_points"), ("Các ý chưa chính xác", "incorrect_points")]:
         if feedback.get(field):
-            st.markdown(f"**{title}:**")
-            for item in feedback[field]:
-                st.write("•", item)
+            panel(title, "\n".join("• " + str(x) for x in feedback[field]), "feedback")
     if feedback.get("feedback"):
-        st.info(feedback["feedback"])
-    st.markdown("**Đáp án / gợi ý trả lời:**")
-    if level(q) == 1:
-        correct_keys = q.get("_keys", [])
-        for key in correct_keys:
-            st.write(f"**{key}.** {q.get('_choices', {}).get(key, '')}")
-    else:
-        reference = norm(q.get("Đáp án tham khảo"))
-        if reference:
-            st.write(reference)
-        else:
-            st.caption("Chưa có đáp án tham khảo.")
-    st.caption("Đáp án tham khảo dùng để học tập; các cách diễn đạt tương đương vẫn được chấp nhận.")
+        panel("Nhận xét của Agent", feedback["feedback"], "feedback")
+    # Do not expose reference answer unless the learner opens it.
+    with st.expander("▸ Xem đáp án gợi ý", expanded=False):
+        panel("Đáp án tham khảo", norm(q.get("Đáp án tham khảo")) or "Chưa có đáp án tham khảo.", "reference")
+        st.caption("Các cách diễn đạt tương đương vẫn được chấp nhận.")
 
 
 # API calls below are limited to initial loading and final batch commit.
@@ -476,7 +491,7 @@ if exam["status"] == "taking":
                 st.stop()
             lev = level(q)
             st.markdown(f"### Câu {i}/{len(order)} · Level {lev} · {'Ôn tập' if item['review'] else str(POINTS[lev])+' điểm'}")
-            st.write(q.get("Câu hỏi", ""))
+            panel("Câu hỏi", q.get("Câu hỏi", ""), "question")
             if lev == 1:
                 # Shuffle option order without changing the underlying answer keys.
                 keys = sorted(q["_choices"])
@@ -504,7 +519,7 @@ if exam["status"] == "grading":
     with st.spinner("Đang chấm điểm và tạo nhận xét. Vui lòng không tải lại trang..."):
         try:
             exam["results"] = grade_submission(student, selected_day, order, bank, exam["responses"], exam["sid"])
-            exam["status"] = "graded"
+            exam["status"] = "saving"
             st.rerun()
         except Exception as exc:
             st.error(f"Chấm điểm chưa hoàn tất: {exc}")
@@ -513,27 +528,33 @@ if exam["status"] == "grading":
                 st.rerun()
     st.stop()
 
+# Automatically persist the entire graded exam, without a second learner action.
+if exam["status"] == "saving":
+    with st.spinner("Đang tự động lưu kết quả lên Google Sheets..."):
+        try:
+            commit_results(exam["sid"], student, selected_day, order, exam["results"], students)
+            exam["status"] = "saved"
+            st.rerun()
+        except Exception as exc:
+            exam["status"] = "save_failed"
+            exam["save_error"] = str(exc)
+            st.rerun()
+    st.stop()
+
 results = exam["results"] or []
 completed = {r["Question ID"]: r for r in results}
-st.success("Đã chấm bài. Kết quả và nhận xét:")
+if exam["status"] == "saved":
+    st.success("Đã chấm bài và tự động lưu kết quả lên Google Sheets thành công.")
+else:
+    st.error("Đã chấm bài nhưng Google Sheets chưa xác nhận lưu thành công. Kết quả vẫn được giữ trong phiên hiện tại.")
+    st.caption(exam.get("save_error", "Lỗi đồng bộ Google Sheets."))
+    if st.button("Thử đồng bộ lại kết quả", type="primary"):
+        exam["status"] = "saving"
+        st.rerun()
 show_final_report(order, completed, bank)
 for i, item in enumerate(order, 1):
     q = bank[item["id"]]
     with st.expander(f"Câu {i} – Level {level(q)} · {completed[item['id']]['Điểm đạt']}/{POINTS[level(q)]} điểm"):
-        st.write(q.get("Câu hỏi", ""))
-        st.write("**Câu trả lời của bạn:**", completed[item["id"]].get("Câu trả lời", ""))
+        panel("Câu hỏi", q.get("Câu hỏi", ""), "question")
+        panel("Câu trả lời của học viên", completed[item["id"]].get("Câu trả lời", ""), "answer")
         show_feedback(q, completed[item["id"]])
-
-if exam["status"] != "saved":
-    st.warning("Kết quả đã chấm nhưng chưa xác nhận lưu Google Sheets. Không đóng trang cho đến khi lưu thành công.")
-    if st.button("Lưu toàn bộ kết quả vào Google Sheets", type="primary"):
-        try:
-            with st.spinner("Đang lưu kết quả theo lô..."):
-                commit_results(exam["sid"], student, selected_day, order, results, students)
-            exam["status"] = "saved"
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Lưu chưa hoàn tất: {exc}")
-            st.info("Kết quả vẫn giữ trong phiên hiện tại. Có thể bấm lưu lại; hệ thống kiểm tra Session ID để hạn chế ghi trùng.")
-else:
-    st.success("Đã lưu kết quả lên Google Sheets thành công.")
