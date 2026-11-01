@@ -512,6 +512,15 @@ def report_feedback(value):
         return {"feedback": raw}
 
 
+def trainer_approved(rows):
+    return bool(rows) and all(norm(r.get("Trạng thái kiểm duyệt")).casefold() == "trainer approved" for r in rows)
+
+def report_number(value):
+    try:
+        return float(str(value or "0").replace(",", "."))
+    except (ValueError, TypeError):
+        return 0.0
+
 def show_student_report(student, selected_day, history):
     """Read final values from Câu trả lời; never expose Trainer action plans."""
     from datetime import date
@@ -527,10 +536,14 @@ def show_student_report(student, selected_day, history):
     if sid:
         rows = [r for r in rows if norm(r.get("Session ID")) == sid]
 
-    # Keep reports private until the following calendar day when a parseable date is available.
+    if not trainer_approved(rows):
+        st.info("Báo cáo chưa được Trainer phê duyệt và công bố.")
+        return
+
+    # Use submission timestamp, not training day number, for next-day release.
     dated = []
     for r in rows:
-        raw = norm(r.get("Ngày đánh giá") or r.get("Ngày"))
+        raw = norm(r.get("Thời gian trả lời"))
         for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S"):
             try:
                 dated.append(datetime.strptime(raw[:19], fmt).date())
@@ -546,14 +559,8 @@ def show_student_report(student, selected_day, history):
         st.info("Báo cáo đang được chấm và hoàn thiện.")
         return
 
-    def number(v):
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return 0.0
-
-    earned = sum(number(r.get("Điểm đạt")) for r in graded)
-    maximum = sum(number(r.get("Điểm tối đa")) for r in graded)
+    earned = sum(report_number(r.get("Điểm đạt")) for r in graded)
+    maximum = sum(report_number(r.get("Điểm tối đa")) for r in graded)
     st.subheader("Tổng quan kết quả")
     c1, c2 = st.columns(2)
     c1.metric("Điểm đạt", f"{earned:g}/{maximum:g}")
@@ -662,9 +669,33 @@ if mode.startswith("Trainer"):
                 st.text_area("Hành trình học tập", journey, height=160, disabled=True)
             if not all((st.secrets.get("SMTP_HOST"), st.secrets.get("SMTP_USERNAME"), st.secrets.get("SMTP_PASSWORD"))):
                 st.warning("Chưa cấu hình SMTP trong Streamlit Secrets: SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD.")
-            confirmed = st.checkbox("Tôi đã rà soát và xác nhận kết quả cuối cùng")
+            is_approved = trainer_approved(matches)
+            if is_approved:
+                st.success("Báo cáo đã được Trainer phê duyệt.")
+            else:
+                st.warning("Báo cáo chưa được Trainer phê duyệt.")
+                if st.button("Phê duyệt và công bố báo cáo"):
+                    try:
+                        ws = sheet("Câu trả lời")
+                        values = retry_sheets(lambda: ws.get_all_values())
+                        headers = values[0]
+                        sid_col = headers.index("Session ID")
+                        status_col = headers.index("Trạng thái kiểm duyệt") + 1
+                        sid = norm(matches[-1].get("Session ID"))
+                        updates = [{"range": gspread.utils.rowcol_to_a1(i, status_col),
+                                    "values": [["Trainer approved"]]}
+                                   for i, row in enumerate(values[1:], 2)
+                                   if len(row) > sid_col and row[sid_col] == sid]
+                        if not updates:
+                            raise RuntimeError("Không tìm thấy Session ID để phê duyệt.")
+                        retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
+                        records.clear()
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Không phê duyệt được: {exc}")
+            confirmed = st.checkbox("Tôi xác nhận gửi báo cáo đã phê duyệt")
             valid_email = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient))
-            if st.button("Gửi báo cáo email", disabled=not (confirmed and valid_email)):
+            if st.button("Gửi báo cáo email", disabled=not (confirmed and valid_email and is_approved)):
                 try:
                     send_report_email(recipient, student, selected_day, matches)
                     st.success("Đã gửi email cho học viên, CC Trainer.")
