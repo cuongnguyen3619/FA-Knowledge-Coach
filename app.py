@@ -412,6 +412,110 @@ def commit_results(sid, student, selected_day, order, results, students):
         retry_sheets(lambda: sws.append_row([sid, student, dealer, selected_day, 1, timestamp(), timestamp(), len(order), fresh_score, 32, round(fresh_score / 32 * 100, 2), "", "", "", "", "13 câu mới; câu ôn tập không tính điểm", "", "Completed"], value_input_option="RAW"))
     return fresh_score
 
+def report_feedback(value):
+    """Support both JSON Agent feedback and Trainer-edited plain text."""
+    if isinstance(value, dict):
+        return value
+    raw = norm(value)
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {"feedback": raw}
+    except (ValueError, TypeError):
+        return {"feedback": raw}
+
+
+def show_student_report(student, selected_day, history):
+    """Read final values from Câu trả lời; never expose Trainer action plans."""
+    from datetime import date
+    rows = [r for r in history
+            if norm(r.get("Họ và tên") or r.get("Học viên")) == student
+            and norm(r.get("Ngày đánh giá") or r.get("Ngày")) in (str(selected_day), f"Ngày {selected_day}")]
+    if not rows:
+        st.info("Chưa có báo cáo cho học viên và ngày đã chọn.")
+        return
+
+    # When the same student has multiple attempts, display only the latest session.
+    sid = norm(rows[-1].get("Session ID"))
+    if sid:
+        rows = [r for r in rows if norm(r.get("Session ID")) == sid]
+
+    # Keep reports private until the following calendar day when a parseable date is available.
+    dated = []
+    for r in rows:
+        raw = norm(r.get("Ngày đánh giá") or r.get("Ngày"))
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dated.append(datetime.strptime(raw[:19], fmt).date())
+                break
+            except ValueError:
+                pass
+    if dated and max(dated) >= datetime.now(TZ).date():
+        st.info("Báo cáo sẽ được mở từ ngày hôm sau, sau khi Trainer rà soát.")
+        return
+
+    graded = [r for r in rows if norm(r.get("Điểm đạt")) and norm(r.get("Điểm tối đa"))]
+    if not graded:
+        st.info("Báo cáo đang được chấm và hoàn thiện.")
+        return
+
+    def number(v):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
+
+    earned = sum(number(r.get("Điểm đạt")) for r in graded)
+    maximum = sum(number(r.get("Điểm tối đa")) for r in graded)
+    st.subheader("Tổng quan kết quả")
+    c1, c2 = st.columns(2)
+    c1.metric("Điểm đạt", f"{earned:g}/{maximum:g}")
+    c2.metric("Số câu đã chấm", f"{len(graded)}")
+
+    journey = next((norm(r.get("Hành trình học tập")) for r in rows
+                    if norm(r.get("Hành trình học tập"))), "")
+    st.subheader("Hành trình học tập")
+    if journey:
+        st.write(journey)
+    else:
+        st.info("Trainer đang hoàn thiện phần Hành trình học tập.")
+
+    review = list(dict.fromkeys(norm(r.get("Kiến thức cần ôn tập")) for r in rows
+                                if norm(r.get("Kiến thức cần ôn tập"))))
+    if review:
+        st.subheader("Kiến thức cần ôn tập")
+        for item in review:
+            st.write("•", item)
+
+    st.subheader("Chi tiết từng câu")
+    for i, r in enumerate(rows, 1):
+        qid = norm(r.get("Question ID"))
+        score = norm(r.get("Điểm đạt"))
+        total = norm(r.get("Điểm tối đa"))
+        with st.expander(f"Câu {i} · Level {norm(r.get('Level'))} · {score or '—'}/{total or '—'} điểm"):
+            if qid:
+                st.caption(f"Question ID: {qid}")
+            panel("Câu hỏi", r.get("Câu hỏi"), "question")
+            panel("Câu trả lời của học viên",
+                  r.get("Nội dung trả lời học viên") or r.get("Câu trả lời"), "answer")
+            fb = report_feedback(r.get("Đánh giá từ Agent"))
+            if fb.get("feedback"):
+                panel("Nhận xét", fb["feedback"], "feedback")
+            for key, label in (("correct_points", "Ý đúng"),
+                               ("missing_points", "Ý còn thiếu"),
+                               ("incorrect_points", "Ý chưa chính xác")):
+                values = fb.get(key, [])
+                if isinstance(values, list) and values:
+                    st.markdown(f"**{label}:**")
+                    for value in values:
+                        st.write("•", value)
+            suggested = (fb.get("suggested_answer") or fb.get("model_answer")
+                         or r.get("Đáp án chuẩn đã duyệt"))
+            if suggested:
+                panel("Đáp án gợi ý", suggested, "reference")
+            if norm(r.get("Kiến thức cần ôn tập")):
+                st.caption("Cần ôn: " + norm(r.get("Kiến thức cần ôn tập")))
+
+
 # Avoid loading data on every widget change: the full assessment uses one st.form.
 try:
     students, bank, history, assignments = get_initial_data()
@@ -421,7 +525,7 @@ except Exception as exc:
     st.stop()
 
 with st.sidebar:
-    mode = st.radio("Chế độ", ["Học viên", "Trainer – Xem trước", "Trainer – Cảnh báo"])
+    mode = st.radio("Chế độ", ["Làm bài kiểm tra", "Xem báo cáo học tập", "Trainer – Xem trước", "Trainer – Cảnh báo"])
     selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
     st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
 
@@ -430,6 +534,14 @@ if not names:
     st.warning("Chưa có học viên trong tab Học viên")
     st.stop()
 student = st.selectbox("Học viên", names)
+
+if mode == "Xem báo cáo học tập":
+    # Refresh explicitly to pick up Trainer edits without reloading on every widget interaction.
+    if st.button("Làm mới báo cáo"):
+        records.clear()
+        st.rerun()
+    show_student_report(student, selected_day, history)
+    st.stop()
 
 if mode.startswith("Trainer"):
     password = st.secrets.get("TRAINER_PASSWORD")
