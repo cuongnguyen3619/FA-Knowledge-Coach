@@ -495,12 +495,63 @@ def send_report_email(recipient, student, selected_day, rows):
                           f"Điểm: {report_number(r.get('Điểm đạt')):g}/{report_number(r.get('Điểm tối đa')):g}",
                           f"Nhận xét: {norm(fb.get('feedback'))}",
                           f"Đáp án tham khảo: {reference}", ""])
+    # HTML email: readable on Gmail/mobile; text/plain remains as fallback.
+    from html import escape as html_escape
+    def h(value):
+        return html_escape(str(value or "")).replace("\\n", "<br>")
+    sections = []
+    for i, r in enumerate(rows, 1):
+        q = bank.get(norm(r.get("Question ID")), {})
+        is_l1 = norm(r.get("Level")) == "1"
+        answer = norm(r.get("Nội dung trả lời học viên"))
+        reference = norm(r.get("Đáp án chuẩn đã duyệt"))
+        if is_l1:
+            choices = q.get("_choices", {})
+            def expand(raw):
+                keys = re.findall(r"[A-D]", raw.upper())
+                return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
+            answer, reference = expand(answer), expand(reference)
+        detail = (
+            f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">Trả lời:</span> {h(answer)}</div>'
+        )
+        if not is_l1:
+            feedback = norm(report_feedback(r.get("Đánh giá từ Agent")).get("feedback"))
+            detail += (
+                f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">Điểm:</span> '
+                f'{report_number(r.get("Điểm đạt")):g}/{report_number(r.get("Điểm tối đa")):g}</div>'
+                f'<div style="padding:14px 16px;background:#f0f7fc;border-left:3px solid #1473a5;'
+                f'border-radius:5px;margin:14px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
+                f'<div style="margin-top:8px;line-height:1.65;color:#263445">{h(feedback)}</div></div>'
+            )
+        detail += (f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">'
+                   f'{"Đáp án" if is_l1 else "Đáp án tham khảo"}:</span> {h(reference)}</div>')
+        sections.append(
+            f'<div style="border:1px solid #e2e8f0;border-radius:10px;padding:20px;'
+            f'margin:18px 0;background:#ffffff">'
+            f'<h3 style="margin:0 0 14px;color:#123b70;font-size:17px;line-height:1.45">'
+            f'Câu {i}. {h(r.get("Câu hỏi"))}</h3>{detail}</div>'
+        )
+    html_body = (
+        '<html><body style="margin:0;padding:24px 12px;background:#f5f7fb;'
+        'font-family:Arial,Helvetica,sans-serif;color:#1e293b">'
+        '<div style="max-width:720px;margin:auto">'
+        '<div style="background:#123b70;color:white;padding:24px;border-radius:10px">'
+        f'<h1 style="font-size:22px;margin:0 0 12px;color:white">BÁO CÁO HỌC TẬP - NGÀY {selected_day}</h1>'
+        f'<div style="font-size:16px">Học viên: <strong>{h(student)}</strong></div>'
+        f'<div style="font-size:19px;margin-top:10px">Điểm: <strong>{earned:g}/{maximum:g}</strong></div>'
+        '</div>'
+        '<div style="padding:16px;background:#eaf2fc;border-radius:8px;margin:16px 0;line-height:1.6">'
+        '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
+        'các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.</div>'
+        + "".join(sections) + '</div></body></html>'
+    )
     message = EmailMessage()
     message["Subject"] = f"FA Knowledge Coach - Báo cáo Ngày {selected_day} - {student}"
     message["From"] = st.secrets.get("SMTP_FROM", username)
     message["To"] = recipient
     message["Cc"] = TRAINER_CC
     message.set_content("\n".join(lines))
+    message.add_alternative(html_body, subtype="html")
     if port == 465:
         with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
             smtp.login(username, password)
