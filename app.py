@@ -702,6 +702,29 @@ except Exception as exc:
     st.exception(exc)
     st.stop()
 
+def course_window():
+    now = datetime.now(TZ)
+    schedule = []
+    for row in retry_sheets(lambda: sheet("Khóa học").get_all_values())[1:]:
+        if len(row) < 4:
+            continue
+        match = re.search(r"(\d+)", norm(row[0]))
+        if not match:
+            continue
+        date_part = datetime.strptime(norm(row[1]), "%d-%b").replace(year=now.year).date()
+        start = datetime.strptime(norm(row[2]), "%I:%M %p").time()
+        end = datetime.strptime(norm(row[3]), "%I:%M %p").time()
+        opens = datetime.combine(date_part, start, tzinfo=TZ)
+        closes = datetime.combine(date_part, end, tzinfo=TZ)
+        if closes <= opens:
+            raise ValueError("Giờ đóng bài phải sau giờ mở bài")
+        schedule.append((int(match.group(1)), opens, closes))
+    if not schedule:
+        raise ValueError("Không tìm thấy lịch hợp lệ trong tab Khóa học")
+    active = next((item for item in schedule if item[1] <= now < item[2]), None)
+    return now, active, sorted(schedule, key=lambda item: item[1])
+
+
 with st.sidebar:
     role = st.radio("Giao diện", ["Học viên", "Trainer"])
     if role == "Trainer":
@@ -711,8 +734,16 @@ with st.sidebar:
         mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
     else:
         mode = "Làm bài kiểm tra"
-    selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
-    st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
+    if role == "Trainer":
+        selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
+        st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
+    else:
+        try:
+            now, active_window, course_schedule = course_window()
+        except Exception as exc:
+            st.error(f"Lịch kiểm tra chưa hợp lệ: {exc}")
+            st.stop()
+        selected_day = active_window[0] if active_window else None
 
 names = [norm(x.get("Họ và tên")) for x in students if norm(x.get("Họ và tên"))]
 if not names:
@@ -864,6 +895,13 @@ if mode.startswith("Trainer"):
         st.write(f"Level {lev}: {len(eligible)} câu hợp lệ / cần {count}")
     st.stop()
 
+if role == "Học viên" and active_window is None:
+    st.info("Bài kiểm tra chưa mở hoặc đã hết giờ.")
+    upcoming = next((item for item in course_schedule if item[1] > now), None)
+    if upcoming:
+        st.caption(f"Lượt tiếp theo: Ngày {upcoming[0]} · {upcoming[1]:%d/%m/%Y} · {upcoming[1]:%H:%M}–{upcoming[2]:%H:%M}")
+    st.stop()
+
 st.subheader(f"Bài đánh giá – Ngày {selected_day}")
 key = f"exam_v6:{student}:{selected_day}"
 if key not in st.session_state:
@@ -897,7 +935,7 @@ if exam["status"] == "taking":
                 st.error(f"Thiếu câu hỏi {item['id']} trong ngân hàng")
                 st.stop()
             lev = level(q)
-            st.markdown(f"### Câu {i}/{len(order)} · Level {lev} · {'Ôn tập' if item['review'] else str(POINTS[lev])+' điểm'}")
+            st.markdown(f"### Câu {i}/{len(order)}")
             panel("Câu hỏi", q.get("Câu hỏi", ""), "question")
             if lev == 1:
                 # Shuffle option order without changing the underlying answer keys.
@@ -914,6 +952,9 @@ if exam["status"] == "taking":
                 responses[item["id"]] = st.text_area("Câu trả lời", key=f"{key}:{item['id']}", height=120)
         submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
     if submitted:
+        if datetime.now(TZ) >= active_window[2]:
+            st.error("Đã hết giờ làm bài. Vui lòng liên hệ Giảng viên.")
+            st.stop()
         if any(not responses.get(item["id"], "").strip() for item in order):
             st.warning("Bạn còn câu chưa trả lời. Vui lòng hoàn thành trước khi nộp.")
             st.stop()
