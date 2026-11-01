@@ -463,27 +463,38 @@ def send_report_email(recipient, student, selected_day, rows):
     port = int(st.secrets.get("SMTP_PORT", 465))
     if not all((host, username, password)):
         raise RuntimeError("Cần cấu hình SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD trong Streamlit Secrets")
-    def number(value):
-        try:
-            return float(str(value or "0").replace(",", "."))
-        except (ValueError, TypeError):
-            return 0.0
-    earned = sum(number(r.get("Điểm đạt")) for r in rows)
-    maximum = sum(number(r.get("Điểm tối đa")) for r in rows)
+    # Google Sheets may return Vietnamese decimals as "1,6".
+    # Only the 13 new questions contribute to the 32-point total.
+    earned = sum(report_number(r.get("Điểm đạt")) for r in rows
+                 if not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
+    maximum = sum(report_number(r.get("Điểm tối đa")) for r in rows
+                  if not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
     lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
-             f"Học viên: {student}", f"Điểm: {earned:g}/{maximum:g}", ""]
-    journey = next((norm(r.get("Hành trình học tập")) for r in rows
-                    if norm(r.get("Hành trình học tập"))), "")
-    if journey:
-        lines.extend(["HÀNH TRÌNH HỌC TẬP", journey, ""])
+             f"Học viên: {student}", f"Điểm: {earned:g}/{maximum:g}", "",
+             "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.", ""]
     for i, r in enumerate(rows, 1):
-        fb = report_feedback(r.get("Đánh giá từ Agent"))
-        lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
-                      f"Trả lời: {norm(r.get('Nội dung trả lời học viên'))}",
-                      f"Điểm: {norm(r.get('Điểm đạt'))}/{norm(r.get('Điểm tối đa'))}",
-                      f"Nhận xét: {norm(r.get('Nhận xét Trainer')) or norm(fb.get('feedback'))}",
-                      f"Đáp án tham khảo: {norm(r.get('Đáp án chuẩn đã duyệt'))}",
-                      f"Cần ôn: {norm(r.get('Kiến thức cần ôn tập'))}", ""])
+        qid = norm(r.get("Question ID"))
+        q = bank.get(qid, {})
+        is_l1 = norm(r.get("Level")) == "1"
+        answer = norm(r.get("Nội dung trả lời học viên"))
+        reference = norm(r.get("Đáp án chuẩn đã duyệt"))
+        if is_l1:
+            choices = q.get("_choices", {})
+            def describe_keys(raw):
+                keys = re.findall(r"[A-D]", raw.upper())
+                return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
+            answer = describe_keys(answer)
+            reference = describe_keys(reference)
+            lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
+                          f"Trả lời: {answer}",
+                          f"Đáp án: {reference}", ""])
+        else:
+            fb = report_feedback(r.get("Đánh giá từ Agent"))
+            lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
+                          f"Trả lời: {answer}",
+                          f"Điểm: {report_number(r.get('Điểm đạt')):g}/{report_number(r.get('Điểm tối đa')):g}",
+                          f"Nhận xét: {norm(fb.get('feedback'))}",
+                          f"Đáp án tham khảo: {reference}", ""])
     message = EmailMessage()
     message["Subject"] = f"FA Knowledge Coach - Báo cáo Ngày {selected_day} - {student}"
     message["From"] = st.secrets.get("SMTP_FROM", username)
