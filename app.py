@@ -376,6 +376,13 @@ def grade_submission(student, selected_day, order, bank, responses, sid):
                        "Trang nguồn": q.get("Trang nguồn") or q.get("File nguồn"),
                        "Thời gian": timestamp(), "Trạng thái kiểm duyệt": "Pending Trainer review" if needs_review else "Auto graded",
                        "review": item.get("review", False)})
+    aliases = {"Ngày đánh giá": "Ngày", "Nội dung trả lời học viên": "Câu trả lời",
+               "Đáp án chuẩn đã duyệt": "Đáp án tham khảo", "Kết luận": "Kết quả",
+               "Kiến thức cần ôn tập": "Nội dung cần ôn", "Nguồn đối chiếu": "Trang nguồn",
+               "Thời gian trả lời": "Thời gian"}
+    for row in output:
+        for target, source in aliases.items():
+            row[target] = row.get(source, "")
     return output
 
 def commit_results(sid, student, selected_day, order, results, students):
