@@ -458,7 +458,7 @@ def send_report_email(recipient, student, selected_day, rows):
     message["From"] = st.secrets.get("SMTP_FROM", username)
     message["To"] = recipient
     message["Cc"] = TRAINER_CC
-    message.set_content("\\n".join(lines))
+    message.set_content("\n".join(lines))
     if port == 465:
         with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
             smtp.login(username, password)
@@ -622,7 +622,7 @@ if mode.startswith("Trainer"):
         else:
             st.write(f"Báo cáo gồm {len(matches)} câu. Dữ liệu lấy trực tiếp từ Google Sheets.")
             confirmed = st.checkbox("Tôi đã rà soát và xác nhận kết quả cuối cùng")
-            valid_email = bool(re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", recipient))
+            valid_email = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient))
             if st.button("Gửi báo cáo email", disabled=not (confirmed and valid_email)):
                 try:
                     send_report_email(recipient, student, selected_day, matches)
