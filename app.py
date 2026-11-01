@@ -432,7 +432,7 @@ def commit_results(sid, student, selected_day, order, results, students):
     if not already:
         # Use sheet header mapping, preserving existing column layout.
         journey = learning_journey(results)
-        data = [[(journey if h == "Hành trình học tập" else r.get(h, "")) for h in headers] for r in results]
+        data = [[r.get(h, "") for h in headers] for r in results]
         retry_sheets(lambda: ws.append_rows(data, value_input_option="RAW"))
     fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
     aws = sheet("Bài kiểm tra")
@@ -449,7 +449,26 @@ def commit_results(sid, student, selected_day, order, results, students):
     summary = retry_sheets(lambda: sws.get_all_values())
     if not any(row and row[0] == sid for row in summary[1:]):
         dealer = next((x.get("Đại lý", "") for x in students if norm(x.get("Họ và tên")) == student), "")
-        retry_sheets(lambda: sws.append_row([sid, student, dealer, selected_day, 1, timestamp(), timestamp(), len(order), fresh_score, 32, round(fresh_score / 32 * 100, 2), "", "", "", "", "13 câu mới; câu ôn tập không tính điểm", "", "Completed"], value_input_option="RAW"))
+        summary_headers = summary[0]
+        journey = learning_journey(results)
+        review_topics = list(dict.fromkeys(
+            str(r.get("Kiến thức cần ôn tập") or "").strip()
+            for r in results if not r.get("review") and str(r.get("Kiến thức cần ôn tập") or "").strip()))
+        plan = "Ưu tiên ôn tập: " + "; ".join(review_topics[:5]) if review_topics else "Tiếp tục luyện tập và củng cố kiến thức."
+        by_level = {}
+        for lev in (2, 3, 4):
+            group = [r for r in results if not r.get("review") and int(r.get("Level") or 0) == lev]
+            got = sum(float(r.get("Điểm đạt") or 0) for r in group)
+            total = sum(float(r.get("Điểm tối đa") or 0) for r in group)
+            by_level[f"Điểm Level {lev} (%)"] = round(got / total * 100, 2) if total else ""
+        values = {"Session ID": sid, "Họ và tên": student, "Đại lý": dealer,
+                  "Ngày đánh giá": selected_day, "Lần làm": 1,
+                  "Bắt đầu lúc": timestamp(), "Nộp lúc": timestamp(),
+                  "Số câu": len(order), "Điểm đạt": fresh_score, "Điểm tối đa": 32,
+                  "Tỷ lệ (%)": round(fresh_score / 32 * 100, 2),
+                  "Trạng thái": "Completed", "Hành trình học tập": journey,
+                  "Nội dung cần ôn tập cho ngày tiếp theo": plan, **by_level}
+        retry_sheets(lambda: sws.append_row([values.get(h, "") for h in summary_headers], value_input_option="RAW"))
     return fresh_score
 
 
