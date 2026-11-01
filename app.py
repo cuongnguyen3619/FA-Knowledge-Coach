@@ -474,7 +474,7 @@ def commit_results(sid, student, selected_day, order, results, students):
 
 TRAINER_CC = "daotao.sanpham@gmail.com"
 
-def send_report_email(recipient, student, selected_day, rows):
+def send_report_email(recipient, student, dealer, selected_day, rows):
     """Send Trainer-reviewed report using SMTP settings in Streamlit Secrets."""
     host = st.secrets.get("SMTP_HOST")
     username = st.secrets.get("SMTP_USERNAME")
@@ -489,7 +489,7 @@ def send_report_email(recipient, student, selected_day, rows):
     maximum = sum(report_number(r.get("Điểm tối đa")) for r in rows
                   if not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
     lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
-             f"Học viên: {student}", f"Điểm: {earned:g}/{maximum:g}", "",
+             f"Học viên: {student}", f"Đại lý: {dealer}", f"Điểm: {earned:g}/{maximum:g}", "",
              "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.", ""]
     for i, r in enumerate(rows, 1):
         qid = norm(r.get("Question ID"))
@@ -557,6 +557,7 @@ def send_report_email(recipient, student, selected_day, rows):
         '<div style="background:#123b70;color:white;padding:24px;border-radius:10px">'
         f'<h1 style="font-size:22px;margin:0 0 12px;color:white">BÁO CÁO HỌC TẬP - NGÀY {selected_day}</h1>'
         f'<div style="font-size:16px">Học viên: <strong>{h(student)}</strong></div>'
+        f'<div style="font-size:15px;margin-top:6px">Đại lý: <strong>{h(dealer)}</strong></div>'
         f'<div style="font-size:19px;margin-top:10px">Điểm: <strong>{earned:g}/{maximum:g}</strong></div>'
         '</div>'
         '<div style="padding:16px;background:#eaf2fc;border-radius:8px;margin:16px 0;line-height:1.6">'
@@ -647,8 +648,8 @@ def show_student_report(student, selected_day, history):
     c1.metric("Điểm đạt", f"{earned:g}/{maximum:g}")
     c2.metric("Số câu đã chấm", f"{len(graded)}")
 
-    journey = next((norm(r.get("Hành trình học tập")) for r in rows
-                    if norm(r.get("Hành trình học tập"))), "")
+    journey = next((norm(r.get("Hành trình học tập")) for r in records("Lượt đánh giá")
+                    if norm(r.get("Session ID")) == sid), "")
     st.subheader("Hành trình học tập")
     if journey:
         st.write(journey)
@@ -702,7 +703,14 @@ except Exception as exc:
     st.stop()
 
 with st.sidebar:
-    mode = st.radio("Chế độ", ["Làm bài kiểm tra", "Xem báo cáo học tập", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
+    role = st.radio("Giao diện", ["Học viên", "Trainer"])
+    if role == "Trainer":
+        password = st.secrets.get("TRAINER_PASSWORD")
+        if not password or st.text_input("Mật khẩu Trainer", type="password") != password:
+            st.stop()
+        mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
+    else:
+        mode = st.radio("Chức năng", ["Làm bài kiểm tra", "Xem báo cáo học tập"])
     selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
     st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
 
@@ -711,6 +719,35 @@ if not names:
     st.warning("Chưa có học viên trong tab Học viên")
     st.stop()
 student = st.selectbox("Học viên", names)
+student_info = next((x for x in students if norm(x.get("Họ và tên")) == student), {})
+st.caption("Đại lý: " + norm(student_info.get("Đại lý")))
+if role == "Học viên":
+    with st.expander("Email nhận báo cáo"):
+        current_email = norm(student_info.get("Email"))
+        if current_email:
+            st.info("Email đã đăng ký: " + current_email + ". Liên hệ Trainer nếu cần thay đổi.")
+        else:
+            with st.form("email_registration"):
+                new_email = st.text_input("Email", placeholder="ten@example.com")
+                save_email = st.form_submit_button("Lưu email")
+            if save_email:
+                if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", new_email.strip()):
+                    st.error("Email không hợp lệ.")
+                else:
+                    ws = sheet("Học viên")
+                    data = retry_sheets(lambda: ws.get_all_values())
+                    headers = data[0]
+                    col = headers.index("Email") + 1
+                    row_index = next((i for i, row in enumerate(data[1:], 2) if row and norm(row[0]) == student), None)
+                    if row_index is None:
+                        st.error("Không tìm thấy học viên.")
+                    elif len(data[row_index-1]) >= col and norm(data[row_index-1][col-1]):
+                        st.warning("Email đã tồn tại. Liên hệ Trainer để thay đổi.")
+                    else:
+                        retry_sheets(lambda: ws.update_cell(row_index, col, new_email.strip()))
+                        records.clear()
+                        st.success("Đã lưu email vào Google Sheets.")
+                        st.rerun()
 
 if mode == "Xem báo cáo học tập":
     # Refresh explicitly to pick up Trainer edits without reloading on every widget interaction.
@@ -721,11 +758,29 @@ if mode == "Xem báo cáo học tập":
     st.stop()
 
 if mode.startswith("Trainer"):
-    password = st.secrets.get("TRAINER_PASSWORD")
-    if not password:
-        st.error("Cần đặt TRAINER_PASSWORD trong Secrets")
-        st.stop()
-    if st.text_input("Mật khẩu Trainer", type="password") != password:
+    if mode == "Trainer – Dashboard":
+        st.subheader(f"Dashboard lớp – Ngày {selected_day}")
+        if st.button("Làm mới dữ liệu"):
+            records.clear()
+            st.rerun()
+        latest = {}
+        for r in records("Lượt đánh giá"):
+            if norm(r.get("Ngày đánh giá")) == str(selected_day):
+                latest[norm(r.get("Họ và tên"))] = r
+        rows = list(latest.values())
+        completed = [r for r in rows if norm(r.get("Trạng thái")).lower() in ("completed", "hoàn thành")]
+        a, b, c = st.columns(3)
+        a.metric("Học viên", len(names))
+        b.metric("Hoàn thành", f"{len(completed)}/{len(names)}")
+        scores = [report_number(r.get("Tỷ lệ (%)")) for r in completed]
+        c.metric("Điểm TB", f"{sum(scores)/len(scores):.1f}%" if scores else "—")
+        for lev in (2, 3, 4):
+            vals = [report_number(r.get(f"Điểm Level {lev} (%)")) for r in completed if norm(r.get(f"Điểm Level {lev} (%)"))]
+            st.metric(f"Level {lev} TB", f"{sum(vals)/len(vals):.1f}%" if vals else "—")
+        if rows:
+            st.dataframe([{"Học viên": r.get("Họ và tên"), "Đại lý": r.get("Đại lý"), "Điểm": r.get("Điểm đạt"), "Tỷ lệ (%)": r.get("Tỷ lệ (%)"), "Trạng thái": r.get("Trạng thái"), "Ôn tập": r.get("Nội dung cần ôn tập cho ngày tiếp theo")} for r in rows], hide_index=True, use_container_width=True)
+        else:
+            st.info("Chưa có lượt đánh giá.")
         st.stop()
     if mode == "Trainer – Duyệt & gửi tất cả":
         st.subheader(f"Phê duyệt và gửi kết quả – Ngày {selected_day}")
@@ -751,6 +806,7 @@ if mode.startswith("Trainer"):
                              if norm(r.get("Họ và tên")) == name and norm(r.get("Session ID")) == sid]
         directory = {norm(r.get("Họ và tên")): norm(r.get("Email") or r.get("E-mail"))
                      for r in students}
+        dealer_directory = {norm(r.get("Họ và tên")): norm(r.get("Đại lý")) for r in students}
         smtp_ready = all(st.secrets.get(k) for k in ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"))
         if not smtp_ready:
             st.error("Chưa cấu hình SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD trong Streamlit Secrets.")
@@ -782,7 +838,7 @@ if mode.startswith("Trainer"):
                     updates = [{"range": gspread.utils.rowcol_to_a1(i, status_col),
                                 "values": [["Trainer approved"]]} for i, _ in batch]
                     retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
-                    send_report_email(email, name, selected_day, rows)
+                    send_report_email(email, name, dealer_directory.get(name, ""), selected_day, rows)
                     updates = [{"range": gspread.utils.rowcol_to_a1(i, email_col),
                                 "values": [["Đã gửi " + timestamp()]]} for i, _ in batch]
                     retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
@@ -816,7 +872,7 @@ if key not in st.session_state:
         sid = norm(existing.get("Session ID"))
         order = json.loads(existing.get("Danh sách câu JSON") or "[]")
         completed = {norm(x.get("Question ID")): x for x in history if norm(x.get("Session ID")) == sid}
-        st.success("Bài kiểm tra đã hoàn thành và lưu kết quả. Báo cáo chi tiết sẽ được Trainer rà soát trước khi công bố.")
+        st.success("Đã hoàn thành bài kiểm tra. Kết quả sẽ được thông báo sau.")
         st.stop()
     proposed, shortage = build_assignment(student, selected_day, bank, history)
     if shortage:
