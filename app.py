@@ -790,72 +790,67 @@ if mode == "Xem báo cáo học tập":
 
 if mode.startswith("Trainer"):
     if mode == "Trainer – Test học viên":
-        st.subheader("Kiểm tra thử – Học viên")
-        st.caption("Chạy thử độc lập: không ghi Google Sheets, không ảnh hưởng Dashboard và không gửi email.")
-        dealers = sorted({norm(r.get("Đại lý")) for r in students if norm(r.get("Đại lý"))})
-        test_name = st.text_input("Tên học viên test", value="Học viên Test")
-        test_dealer = st.selectbox("Đại lý", ["Nhập đại lý khác"] + dealers)
-        if test_dealer == "Nhập đại lý khác":
-            test_dealer = st.text_input("Tên đại lý")
-        test_email = st.text_input("Email học viên test (không gửi email)")
-        if test_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", test_email.strip()):
-            st.warning("Định dạng email chưa hợp lệ.")
-        st.write(f"Ngày kiểm tra thử: **Ngày {selected_day}**")
-        test_key = f"trainer_test:{selected_day}"
-        if st.button("Tạo bài test mới", disabled=not (test_name.strip() and test_dealer.strip())):
-            proposed, shortage = build_assignment(test_name.strip(), selected_day, bank, [])
-            if shortage:
-                st.error("Ngân hàng câu hỏi chưa đủ để tạo bài test.")
-                for lev, (actual, required) in shortage.items():
-                    st.write(f"Level {lev}: {actual}/{required}")
-            else:
-                st.session_state[test_key] = {"sid": str(uuid.uuid4()), "order": proposed,
-                                              "responses": {}, "results": None}
-                st.rerun()
-        test = st.session_state.get(test_key)
-        if test:
-            st.info(f"Bài test gồm {len(test['order'])} câu. Không giới hạn thời gian theo lịch lớp.")
-            if test["results"] is None:
-                with st.form("trainer_test_form"):
-                    responses = {}
-                    for i, item in enumerate(test["order"], 1):
-                        q = bank[item["id"]]
-                        st.markdown(f"### Câu {i}/{len(test['order'])}")
-                        panel("Câu hỏi", q.get("Câu hỏi", ""))
-                        if level(q) == 1:
-                            choices = q["_choices"]
-                            if len(q["_keys"]) > 1:
-                                chosen = [k for k in choices if st.checkbox(f"{k}. {choices[k]}", key=f"test:{test['sid']}:{item['id']}:{k}")]
-                            else:
-                                chosen_one = st.radio("Chọn đáp án", list(choices), index=None,
-                                                      format_func=lambda k: f"{k}. {choices[k]}",
-                                                      key=f"test:{test['sid']}:{item['id']}")
-                                chosen = [chosen_one] if chosen_one else []
-                            responses[item["id"]] = ",".join(sorted(chosen))
+        st.subheader("Test giao diện học viên")
+        st.caption("Chọn học viên từ danh sách để thử đúng giao diện làm bài. Không ghi dữ liệu test vào Google Sheets hoặc gửi email.")
+        test_student = st.selectbox("Học viên test", names, key="trainer_test_student")
+        test_info = next((r for r in students if norm(r.get("Họ và tên")) == test_student), {})
+        st.write("**Đại lý:** " + norm(test_info.get("Đại lý")))
+        st.write("**Email:** " + (norm(test_info.get("Email")) or "Chưa cập nhật"))
+        test_key = f"trainer_test:{test_student}:{selected_day}"
+        if test_key not in st.session_state:
+            if st.button("Bắt đầu bài kiểm tra", type="primary"):
+                proposed, shortage = build_assignment(test_student, selected_day, bank, [])
+                if shortage:
+                    st.error("Không đủ câu hỏi hợp lệ để tạo bài kiểm tra.")
+                else:
+                    st.session_state[test_key] = {"sid": str(uuid.uuid4()), "order": proposed, "status": "taking", "responses": None}
+                    st.rerun()
+            st.stop()
+        test = st.session_state[test_key]
+        if test["status"] == "taking":
+            order = test["order"]
+            with st.form(f"trainer_test_form:{test_key}"):
+                responses = {}
+                for i, item in enumerate(order, 1):
+                    q = bank[item["id"]]
+                    st.markdown(f"### Câu {i}/{len(order)}")
+                    panel("Câu hỏi", q.get("Câu hỏi", ""), "question")
+                    if level(q) == 1:
+                        keys = sorted(q["_choices"])
+                        seed = int(hashlib.sha256(f"{test['sid']}|{item['id']}".encode()).hexdigest(), 16)
+                        random.Random(seed).shuffle(keys)
+                        if len(q["_keys"]) > 1:
+                            chosen = [k for k in keys if st.checkbox(f"{k}. {q['_choices'][k]}", key=f"{test_key}:{item['id']}:{k}")]
                         else:
-                            responses[item["id"]] = st.text_area("Câu trả lời", key=f"test:{test['sid']}:{item['id']}")
-                    submitted_test = st.form_submit_button("Nộp và chấm bài test")
-                if submitted_test:
-                    if any(not responses.get(item["id"], "").strip() for item in test["order"]):
-                        st.warning("Vui lòng trả lời đủ tất cả câu hỏi.")
+                            chosen_one = st.radio("Chọn đáp án", keys, index=None,
+                                                  key=f"{test_key}:{item['id']}",
+                                                  format_func=lambda k: f"{k}. {q['_choices'][k]}")
+                            chosen = [chosen_one] if chosen_one else []
+                        responses[item["id"]] = ",".join(sorted(chosen))
                     else:
-                        with st.spinner("Đang chấm bài test..."):
-                            try:
-                                test["results"] = grade_submission(test_name.strip(), selected_day, test["order"], bank, responses, test["sid"])
-                                test["responses"] = responses
-                                st.rerun()
-                            except Exception as exc:
-                                st.error(f"Chưa chấm được bài test: {exc}")
-            else:
-                results = test["results"]
-                score = sum(report_number(r["Điểm đạt"]) for r in results if not r["review"])
-                st.success(f"Đã chấm thử: {score:g}/32 điểm. Không lưu vào dữ liệu lớp.")
-                for i, r in enumerate(results, 1):
-                    with st.expander(f"Câu {i} · {report_number(r['Điểm đạt']):g}/{report_number(r['Điểm tối đa']):g}"):
-                        panel("Câu hỏi", r["Câu hỏi"])
-                        panel("Trả lời", r["Câu trả lời"], "answer")
-                        panel("Nhận xét", r["Đánh giá từ Agent"], "feedback")
-                        panel("Đáp án tham khảo", r["Đáp án tham khảo"], "reference")
+                        responses[item["id"]] = st.text_area("Câu trả lời", key=f"{test_key}:{item['id']}", height=120)
+                submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
+            if submitted:
+                if any(not responses.get(item["id"], "").strip() for item in order):
+                    st.warning("Bạn còn câu chưa trả lời. Vui lòng hoàn thành trước khi nộp.")
+                else:
+                    test["responses"] = responses
+                    test["status"] = "grading"
+                    st.rerun()
+        elif test["status"] == "grading":
+            with st.spinner("Đang chấm điểm và tạo nhận xét..."):
+                try:
+                    test["results"] = grade_submission(test_student, selected_day, test["order"], bank, test["responses"], test["sid"])
+                    test["status"] = "saved"
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Chấm bài test chưa thành công: {exc}")
+        else:
+            st.success("Đã hoàn thành bài kiểm tra. Kết quả sẽ được thông báo sau.")
+            st.caption("Chế độ Trainer test: không gửi email, không ghi dữ liệu vào Google Sheets.")
+            if st.button("Làm bài test mới"):
+                del st.session_state[test_key]
+                st.rerun()
         st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
