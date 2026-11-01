@@ -619,7 +619,7 @@ def show_student_report(student, selected_day, history):
         rows = [r for r in rows if norm(r.get("Session ID")) == sid]
 
     if not trainer_approved(rows):
-        st.info("Báo cáo chưa được Trainer phê duyệt và công bố.")
+        st.info("Báo cáo học tập sẽ được gửi về e-mail sau khi Giảng viên rà soát.")
         return
 
     # Use submission timestamp, not training day number, for next-day release.
@@ -633,7 +633,7 @@ def show_student_report(student, selected_day, history):
             except ValueError:
                 pass
     if dated and max(dated) >= datetime.now(TZ).date():
-        st.info("Báo cáo sẽ được mở từ ngày hôm sau, sau khi Trainer rà soát.")
+        st.info("Báo cáo học tập sẽ được gửi về e-mail sau khi Giảng viên rà soát.")
         return
 
     graded = [r for r in rows if norm(r.get("Điểm đạt")) and norm(r.get("Điểm tối đa"))]
@@ -710,7 +710,7 @@ with st.sidebar:
             st.stop()
         mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
     else:
-        mode = st.radio("Chức năng", ["Làm bài kiểm tra", "Xem báo cáo học tập"])
+        mode = "Làm bài kiểm tra"
     selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
     st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
 
