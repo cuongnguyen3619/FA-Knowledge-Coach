@@ -692,13 +692,6 @@ if key not in st.session_state:
         order = json.loads(existing.get("Danh sách câu JSON") or "[]")
         completed = {norm(x.get("Question ID")): x for x in history if norm(x.get("Session ID")) == sid}
         st.success("Bài kiểm tra đã hoàn thành và lưu kết quả. Báo cáo chi tiết sẽ được Trainer rà soát trước khi công bố.")
-        if False and completed:
-            show_final_report(order, completed, bank)
-            for i, item in enumerate(order, 1):
-                if item["id"] in completed and item["id"] in bank:
-                    with st.expander(f"Câu {i} – Level {level(bank[item['id']])}"):
-                        st.write(bank[item["id"]].get("Câu hỏi", ""))
-                        show_feedback(bank[item["id"]], completed[item["id"]])
         st.stop()
     proposed, shortage = build_assignment(student, selected_day, bank, history)
     if shortage:
@@ -785,11 +778,3 @@ else:
         exam["status"] = "saving"
         st.rerun()
 st.info("Đã ghi nhận bài làm. Điểm, nhận xét và đáp án sẽ được công bố sau khi Trainer rà soát.")
-if False:
-    show_final_report(order, completed, bank)
-for i, item in enumerate([] , 1):
-    q = bank[item["id"]]
-    with st.expander(f"Câu {i} – Level {level(q)} · {completed[item['id']]['Điểm đạt']}/{POINTS[level(q)]} điểm"):
-        panel("Câu hỏi", q.get("Câu hỏi", ""), "question")
-        panel("Câu trả lời của học viên", completed[item["id"]].get("Câu trả lời", ""), "answer")
-        show_feedback(q, completed[item["id"]])
