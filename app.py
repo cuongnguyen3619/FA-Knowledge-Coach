@@ -621,7 +621,7 @@ except Exception as exc:
     st.stop()
 
 with st.sidebar:
-    mode = st.radio("Chế độ", ["Làm bài kiểm tra", "Xem báo cáo học tập", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Gửi email"])
+    mode = st.radio("Chế độ", ["Làm bài kiểm tra", "Xem báo cáo học tập", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
     selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
     st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
 
@@ -646,62 +646,74 @@ if mode.startswith("Trainer"):
         st.stop()
     if st.text_input("Mật khẩu Trainer", type="password") != password:
         st.stop()
-    if mode == "Trainer – Gửi email":
-        latest = retry_sheets(lambda: sheet("Câu trả lời").get_all_records(default_blank=""))
-        matches = [r for r in latest if norm(r.get("Họ và tên")) == student
-                   and norm(r.get("Ngày đánh giá")) == str(selected_day)]
-        if matches:
-            sid = norm(matches[-1].get("Session ID"))
-            matches = [r for r in matches if norm(r.get("Session ID")) == sid]
-        info = next((r for r in students if norm(r.get("Họ và tên")) == student), {})
-        recipient = st.text_input("Email học viên", value=norm(info.get("Email") or info.get("E-mail")))
-        st.caption(f"CC Trainer: {TRAINER_CC}")
-        if not matches:
-            st.warning("Không có báo cáo cho học viên/ngày này.")
-        else:
-            st.write(f"Báo cáo gồm {len(matches)} câu. Dữ liệu lấy trực tiếp từ Google Sheets.")
-            st.write("Nhận xét Agent theo từng câu:")
-            for r in matches:
-                fb = report_feedback(r.get("Đánh giá từ Agent"))
-                with st.expander(f"{norm(r.get('Question ID'))} · {norm(r.get('Điểm đạt'))}/{norm(r.get('Điểm tối đa'))}"):
-                    st.write("Nhận xét hiện tại:", fb.get("feedback") or "Chưa có nhận xét")
-            journey = norm(matches[0].get("Hành trình học tập"))
-            if journey:
-                st.text_area("Hành trình học tập", journey, height=160, disabled=True)
-            if not all((st.secrets.get("SMTP_HOST"), st.secrets.get("SMTP_USERNAME"), st.secrets.get("SMTP_PASSWORD"))):
-                st.warning("Chưa cấu hình SMTP trong Streamlit Secrets: SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD.")
-            is_approved = trainer_approved(matches)
-            if is_approved:
-                st.success("Báo cáo đã được Trainer phê duyệt.")
-            else:
-                st.warning("Báo cáo chưa được Trainer phê duyệt.")
-                if st.button("Phê duyệt và công bố báo cáo"):
-                    try:
-                        ws = sheet("Câu trả lời")
-                        values = retry_sheets(lambda: ws.get_all_values())
-                        headers = values[0]
-                        sid_col = headers.index("Session ID")
-                        status_col = headers.index("Trạng thái kiểm duyệt") + 1
-                        sid = norm(matches[-1].get("Session ID"))
-                        updates = [{"range": gspread.utils.rowcol_to_a1(i, status_col),
-                                    "values": [["Trainer approved"]]}
-                                   for i, row in enumerate(values[1:], 2)
-                                   if len(row) > sid_col and row[sid_col] == sid]
-                        if not updates:
-                            raise RuntimeError("Không tìm thấy Session ID để phê duyệt.")
-                        retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
-                        records.clear()
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Không phê duyệt được: {exc}")
-            confirmed = st.checkbox("Tôi xác nhận gửi báo cáo đã phê duyệt")
-            valid_email = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient))
-            if st.button("Gửi báo cáo email", disabled=not (confirmed and valid_email and is_approved)):
+    if mode == "Trainer – Duyệt & gửi tất cả":
+        st.subheader(f"Phê duyệt và gửi kết quả – Ngày {selected_day}")
+        ws = sheet("Câu trả lời")
+        values = retry_sheets(lambda: ws.get_all_values())
+        headers = values[0] if values else []
+        required = ("Session ID", "Họ và tên", "Ngày đánh giá", "Trạng thái kiểm duyệt", "Trạng thái gửi email")
+        if any(h not in headers for h in required):
+            st.error("Thiếu cột bắt buộc trong tab Câu trả lời.")
+            st.stop()
+        entries = [(i, dict(zip(headers, row + [""] * (len(headers)-len(row)))))
+                   for i, row in enumerate(values[1:], 2)]
+        daily = [(i, r) for i, r in entries if norm(r.get("Ngày đánh giá")) == str(selected_day)]
+        # One report per student: use the last recorded session for that day.
+        latest_sessions = {}
+        for i, r in daily:
+            name = norm(r.get("Họ và tên"))
+            if name:
+                latest_sessions[name] = norm(r.get("Session ID"))
+        batches = {}
+        for name, sid in latest_sessions.items():
+            batches[name] = [(i, r) for i, r in daily
+                             if norm(r.get("Họ và tên")) == name and norm(r.get("Session ID")) == sid]
+        directory = {norm(r.get("Họ và tên")): norm(r.get("Email") or r.get("E-mail"))
+                     for r in students}
+        smtp_ready = all(st.secrets.get(k) for k in ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"))
+        if not smtp_ready:
+            st.error("Chưa cấu hình SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD trong Streamlit Secrets.")
+        if not batches:
+            st.info("Chưa có bài nộp nào cho ngày này.")
+            st.stop()
+        pending = []
+        for name, batch in batches.items():
+            email = directory.get(name, "")
+            sent = all(norm(r.get("Trạng thái gửi email")).startswith("Đã gửi") for _, r in batch)
+            st.write(f"**{name}** · {len(batch)} câu · {email or 'CHƯA CÓ EMAIL'} · {'Đã gửi' if sent else 'Chưa gửi'}")
+            if not sent:
+                pending.append((name, email, batch))
+        st.caption(f"{len(batches)} học viên đã nộp · {len(pending)} học viên chưa nhận email.")
+        missing = [name for name, email, _ in pending if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", email)]
+        if missing:
+            st.warning("Thiếu email hợp lệ: " + ", ".join(missing) + ". Cập nhật tab Học viên trước khi duyệt.")
+        confirmed = st.checkbox("Tôi đã rà soát nhận xét và xác nhận công bố, gửi email cho tất cả học viên chưa nhận.")
+        if st.button("Approve & gửi kết quả cho tất cả", type="primary",
+                     disabled=not (confirmed and smtp_ready and not missing and bool(pending))):
+            status_col = headers.index("Trạng thái kiểm duyệt") + 1
+            email_col = headers.index("Trạng thái gửi email") + 1
+            success = []
+            failed = []
+            for name, email, batch in pending:
+                rows = [r for _, r in batch]
                 try:
-                    send_report_email(recipient, student, selected_day, matches)
-                    st.success("Đã gửi email cho học viên, CC Trainer.")
+                    # Mark approved before sending. Email status is saved only after SMTP succeeds.
+                    updates = [{"range": gspread.utils.rowcol_to_a1(i, status_col),
+                                "values": [["Trainer approved"]]} for i, _ in batch]
+                    retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
+                    send_report_email(email, name, selected_day, rows)
+                    updates = [{"range": gspread.utils.rowcol_to_a1(i, email_col),
+                                "values": [["Đã gửi " + timestamp()]]} for i, _ in batch]
+                    retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
+                    success.append(name)
                 except Exception as exc:
-                    st.error(f"Gửi email thất bại: {exc}")
+                    failed.append(f"{name}: {exc}")
+            records.clear()
+            if success:
+                st.success(f"Đã gửi thành công cho {len(success)} học viên: " + ", ".join(success))
+            if failed:
+                st.error("Chưa hoàn tất: " + "; ".join(failed))
+                st.warning("Có thể email đã được gửi nhưng trạng thái lưu thất bại. Kiểm tra trước khi thử lại để tránh gửi trùng.")
         st.stop()
     if mode == "Trainer – Cảnh báo":
         warnings = trainer_warnings(student, history)
