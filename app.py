@@ -387,6 +387,36 @@ def grade_submission(student, selected_day, order, bank, responses, sid):
             row[target] = row.get(source, "")
     return output
 
+def learning_journey(results):
+    fresh = [r for r in results if not r.get("review")]
+    if not fresh:
+        return ""
+    earned = sum(float(r.get("Điểm đạt") or 0) for r in fresh)
+    maximum = sum(float(r.get("Điểm tối đa") or 0) for r in fresh)
+    ratio = earned / maximum if maximum else 0
+    strengths = []
+    gaps = []
+    for lev in (1, 2, 3, 4):
+        group = [r for r in fresh if int(r.get("Level") or 0) == lev]
+        if not group:
+            continue
+        got = sum(float(r.get("Điểm đạt") or 0) for r in group)
+        total = sum(float(r.get("Điểm tối đa") or 0) for r in group)
+        if total and got / total >= .8:
+            strengths.append(f"Level {lev}")
+        elif total and got / total < .5:
+            gaps.append(f"Level {lev}")
+    lines = [f"Kết quả tổng quan: {earned:g}/{maximum:g} điểm ({ratio:.0%})."]
+    lines.append("Điểm mạnh: " + (", ".join(strengths) if strengths else "Cần tiếp tục phát triển kiến thức và kỹ năng."))
+    lines.append("Cần cải thiện: " + (", ".join(gaps) if gaps else "Duy trì luyện tập các nội dung đã học."))
+    missing = list(dict.fromkeys(str(r.get("Kiến thức cần ôn tập") or "").strip()
+                                 for r in fresh if str(r.get("Kiến thức cần ôn tập") or "").strip()))
+    if missing:
+        lines.append("Nội dung ưu tiên ôn tập: " + "; ".join(missing[:5]))
+    lines.append("Khuyến nghị: Ôn các câu dưới 50%, đối chiếu đáp án Trainer và luyện tư vấn thực tế.")
+    return "\n".join(lines)
+
+
 def commit_results(sid, student, selected_day, order, results, students):
     # Idempotency check prevents duplicate answer rows after retry/reconnect.
     # For strict concurrent idempotency use a transactional database.
@@ -401,7 +431,8 @@ def commit_results(sid, student, selected_day, order, results, students):
     already = any(len(row) > sid_col and row[sid_col] == sid for row in existing[1:])
     if not already:
         # Use sheet header mapping, preserving existing column layout.
-        data = [[r.get(h, "") for h in headers] for r in results]
+        journey = learning_journey(results)
+        data = [[(journey if h == "Hành trình học tập" else r.get(h, "")) for h in headers] for r in results]
         retry_sheets(lambda: ws.append_rows(data, value_input_option="RAW"))
     fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
     aws = sheet("Bài kiểm tra")
@@ -621,6 +652,16 @@ if mode.startswith("Trainer"):
             st.warning("Không có báo cáo cho học viên/ngày này.")
         else:
             st.write(f"Báo cáo gồm {len(matches)} câu. Dữ liệu lấy trực tiếp từ Google Sheets.")
+            st.write("Nhận xét Agent theo từng câu:")
+            for r in matches:
+                fb = report_feedback(r.get("Đánh giá từ Agent"))
+                with st.expander(f"{norm(r.get('Question ID'))} · {norm(r.get('Điểm đạt'))}/{norm(r.get('Điểm tối đa'))}"):
+                    st.write(fb.get("feedback") or "Chưa có nhận xét")
+            journey = norm(matches[0].get("Hành trình học tập"))
+            if journey:
+                st.text_area("Hành trình học tập", journey, height=160, disabled=True)
+            if not all((st.secrets.get("SMTP_HOST"), st.secrets.get("SMTP_USERNAME"), st.secrets.get("SMTP_PASSWORD"))):
+                st.warning("Chưa cấu hình SMTP trong Streamlit Secrets: SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD.")
             confirmed = st.checkbox("Tôi đã rà soát và xác nhận kết quả cuối cùng")
             valid_email = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient))
             if st.button("Gửi báo cáo email", disabled=not (confirmed and valid_email)):
@@ -650,8 +691,8 @@ if key not in st.session_state:
         sid = norm(existing.get("Session ID"))
         order = json.loads(existing.get("Danh sách câu JSON") or "[]")
         completed = {norm(x.get("Question ID")): x for x in history if norm(x.get("Session ID")) == sid}
-        st.success("Bài kiểm tra đã hoàn thành và lưu kết quả.")
-        if completed:
+        st.success("Bài kiểm tra đã hoàn thành và lưu kết quả. Báo cáo chi tiết sẽ được Trainer rà soát trước khi công bố.")
+        if False and completed:
             show_final_report(order, completed, bank)
             for i, item in enumerate(order, 1):
                 if item["id"] in completed and item["id"] in bank:
@@ -743,8 +784,10 @@ else:
     if st.button("Thử đồng bộ lại kết quả", type="primary"):
         exam["status"] = "saving"
         st.rerun()
-show_final_report(order, completed, bank)
-for i, item in enumerate(order, 1):
+st.info("Đã ghi nhận bài làm. Điểm, nhận xét và đáp án sẽ được công bố sau khi Trainer rà soát.")
+if False:
+    show_final_report(order, completed, bank)
+for i, item in enumerate([] , 1):
     q = bank[item["id"]]
     with st.expander(f"Câu {i} – Level {level(q)} · {completed[item['id']]['Điểm đạt']}/{POINTS[level(q)]} điểm"):
         panel("Câu hỏi", q.get("Câu hỏi", ""), "question")
