@@ -432,7 +432,9 @@ def commit_results(sid, student, selected_day, order, results, students):
     if not already:
         # Use sheet header mapping, preserving existing column layout.
         journey = learning_journey(results)
-        data = [[(journey if h == "Hành trình học tập" else r.get(h, "")) for h in headers] for r in results]
+        data = [[(journey if h == "Hành trình học tập" else
+                  report_feedback(r.get("Đánh giá từ Agent")).get("feedback", "") if h == "Nhận xét Trainer" else
+                  r.get(h, "")) for h in headers] for r in results]
         retry_sheets(lambda: ws.append_rows(data, value_input_option="RAW"))
     fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
     aws = sheet("Bài kiểm tra")
@@ -481,7 +483,7 @@ def send_report_email(recipient, student, selected_day, rows):
         lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
                       f"Trả lời: {norm(r.get('Nội dung trả lời học viên'))}",
                       f"Điểm: {norm(r.get('Điểm đạt'))}/{norm(r.get('Điểm tối đa'))}",
-                      f"Nhận xét: {norm(fb.get('feedback'))}",
+                      f"Nhận xét: {norm(r.get('Nhận xét Trainer')) or norm(fb.get('feedback'))}",
                       f"Đáp án tham khảo: {norm(r.get('Đáp án chuẩn đã duyệt'))}",
                       f"Cần ôn: {norm(r.get('Kiến thức cần ôn tập'))}", ""])
     message = EmailMessage()
@@ -593,8 +595,9 @@ def show_student_report(student, selected_day, history):
             panel("Câu trả lời của học viên",
                   r.get("Nội dung trả lời học viên") or r.get("Câu trả lời"), "answer")
             fb = report_feedback(r.get("Đánh giá từ Agent"))
-            if fb.get("feedback"):
-                panel("Nhận xét", fb["feedback"], "feedback")
+            comment = norm(r.get("Nhận xét Trainer")) or fb.get("feedback")
+            if comment:
+                panel("Nhận xét", comment, "feedback")
             for key, label in (("correct_points", "Ý đúng"),
                                ("missing_points", "Ý còn thiếu"),
                                ("incorrect_points", "Ý chưa chính xác")):
@@ -663,7 +666,7 @@ if mode.startswith("Trainer"):
             for r in matches:
                 fb = report_feedback(r.get("Đánh giá từ Agent"))
                 with st.expander(f"{norm(r.get('Question ID'))} · {norm(r.get('Điểm đạt'))}/{norm(r.get('Điểm tối đa'))}"):
-                    st.write(fb.get("feedback") or "Chưa có nhận xét")
+                    st.write("Nhận xét hiện tại:", norm(r.get("Nhận xét Trainer")) or fb.get("feedback") or "Chưa có nhận xét")
             journey = norm(matches[0].get("Hành trình học tập"))
             if journey:
                 st.text_area("Hành trình học tập", journey, height=160, disabled=True)
