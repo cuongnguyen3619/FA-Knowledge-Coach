@@ -802,11 +802,11 @@ if exam["status"] == "saving":
 results = exam["results"] or []
 completed = {r["Question ID"]: r for r in results}
 if exam["status"] == "saved":
-    st.success("Đã chấm bài và tự động lưu kết quả lên Google Sheets thành công.")
+    st.success("Đã hoàn thành bài kiểm tra. Kết quả sẽ được thông báo sau.")
 else:
     st.error("Đã chấm bài nhưng Google Sheets chưa xác nhận lưu thành công. Kết quả vẫn được giữ trong phiên hiện tại.")
     st.caption(exam.get("save_error", "Lỗi đồng bộ Google Sheets."))
     if st.button("Thử đồng bộ lại kết quả", type="primary"):
         exam["status"] = "saving"
         st.rerun()
-st.info("Đã ghi nhận bài làm. Điểm, nhận xét và đáp án sẽ được công bố sau khi Trainer rà soát.")
+
