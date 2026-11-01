@@ -1,5 +1,7 @@
 """FA Knowledge Coach v6 – single submission, batch grading and Sheets writes."""
 import hashlib
+import smtplib
+from email.message import EmailMessage
 import json
 import random
 import re
@@ -419,6 +421,54 @@ def commit_results(sid, student, selected_day, order, results, students):
         retry_sheets(lambda: sws.append_row([sid, student, dealer, selected_day, 1, timestamp(), timestamp(), len(order), fresh_score, 32, round(fresh_score / 32 * 100, 2), "", "", "", "", "13 câu mới; câu ôn tập không tính điểm", "", "Completed"], value_input_option="RAW"))
     return fresh_score
 
+
+TRAINER_CC = "daotao.sanpham@gmail.com"
+
+def send_report_email(recipient, student, selected_day, rows):
+    """Send Trainer-reviewed report using SMTP settings in Streamlit Secrets."""
+    host = st.secrets.get("SMTP_HOST")
+    username = st.secrets.get("SMTP_USERNAME")
+    password = st.secrets.get("SMTP_PASSWORD")
+    port = int(st.secrets.get("SMTP_PORT", 465))
+    if not all((host, username, password)):
+        raise RuntimeError("Cần cấu hình SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD trong Streamlit Secrets")
+    def number(value):
+        try:
+            return float(str(value or "0").replace(",", "."))
+        except (ValueError, TypeError):
+            return 0.0
+    earned = sum(number(r.get("Điểm đạt")) for r in rows)
+    maximum = sum(number(r.get("Điểm tối đa")) for r in rows)
+    lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
+             f"Học viên: {student}", f"Điểm: {earned:g}/{maximum:g}", ""]
+    journey = next((norm(r.get("Hành trình học tập")) for r in rows
+                    if norm(r.get("Hành trình học tập"))), "")
+    if journey:
+        lines.extend(["HÀNH TRÌNH HỌC TẬP", journey, ""])
+    for i, r in enumerate(rows, 1):
+        fb = report_feedback(r.get("Đánh giá từ Agent"))
+        lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
+                      f"Trả lời: {norm(r.get('Nội dung trả lời học viên'))}",
+                      f"Điểm: {norm(r.get('Điểm đạt'))}/{norm(r.get('Điểm tối đa'))}",
+                      f"Nhận xét: {norm(fb.get('feedback'))}",
+                      f"Đáp án tham khảo: {norm(r.get('Đáp án chuẩn đã duyệt'))}",
+                      f"Cần ôn: {norm(r.get('Kiến thức cần ôn tập'))}", ""])
+    message = EmailMessage()
+    message["Subject"] = f"FA Knowledge Coach - Báo cáo Ngày {selected_day} - {student}"
+    message["From"] = st.secrets.get("SMTP_FROM", username)
+    message["To"] = recipient
+    message["Cc"] = TRAINER_CC
+    message.set_content("\\n".join(lines))
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
+            smtp.login(username, password)
+            smtp.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=20) as smtp:
+            smtp.starttls()
+            smtp.login(username, password)
+            smtp.send_message(message)
+
 def report_feedback(value):
     """Support both JSON Agent feedback and Trainer-edited plain text."""
     if isinstance(value, dict):
@@ -532,7 +582,7 @@ except Exception as exc:
     st.stop()
 
 with st.sidebar:
-    mode = st.radio("Chế độ", ["Làm bài kiểm tra", "Xem báo cáo học tập", "Trainer – Xem trước", "Trainer – Cảnh báo"])
+    mode = st.radio("Chế độ", ["Làm bài kiểm tra", "Xem báo cáo học tập", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Gửi email"])
     selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
     st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
 
@@ -556,6 +606,29 @@ if mode.startswith("Trainer"):
         st.error("Cần đặt TRAINER_PASSWORD trong Secrets")
         st.stop()
     if st.text_input("Mật khẩu Trainer", type="password") != password:
+        st.stop()
+    if mode == "Trainer – Gửi email":
+        latest = retry_sheets(lambda: sheet("Câu trả lời").get_all_records(default_blank=""))
+        matches = [r for r in latest if norm(r.get("Họ và tên")) == student
+                   and norm(r.get("Ngày đánh giá")) == str(selected_day)]
+        if matches:
+            sid = norm(matches[-1].get("Session ID"))
+            matches = [r for r in matches if norm(r.get("Session ID")) == sid]
+        info = next((r for r in students if norm(r.get("Họ và tên")) == student), {})
+        recipient = st.text_input("Email học viên", value=norm(info.get("Email") or info.get("E-mail")))
+        st.caption(f"CC Trainer: {TRAINER_CC}")
+        if not matches:
+            st.warning("Không có báo cáo cho học viên/ngày này.")
+        else:
+            st.write(f"Báo cáo gồm {len(matches)} câu. Dữ liệu lấy trực tiếp từ Google Sheets.")
+            confirmed = st.checkbox("Tôi đã rà soát và xác nhận kết quả cuối cùng")
+            valid_email = bool(re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", recipient))
+            if st.button("Gửi báo cáo email", disabled=not (confirmed and valid_email)):
+                try:
+                    send_report_email(recipient, student, selected_day, matches)
+                    st.success("Đã gửi email cho học viên, CC Trainer.")
+                except Exception as exc:
+                    st.error(f"Gửi email thất bại: {exc}")
         st.stop()
     if mode == "Trainer – Cảnh báo":
         warnings = trainer_warnings(student, history)
