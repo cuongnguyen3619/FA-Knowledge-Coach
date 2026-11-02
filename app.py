@@ -82,7 +82,7 @@ def sheet(name):
 @st.cache_data(ttl=300, show_spinner=False)
 def records(name):
     # Shared cache prevents a Google Sheets read on every Streamlit rerun.
-    return sheet(name).get_all_records(default_blank="")
+    return sheet(name).get_all_records(default_blank="", numericise_ignore=["all"])
 
 def ensure_tab(name, headers):
     try:
@@ -872,7 +872,7 @@ if mode.startswith("Trainer"):
             vals = [report_number(r.get(f"Điểm Level {lev} (%)")) for r in completed if norm(r.get(f"Điểm Level {lev} (%)"))]
             st.metric(f"Level {lev} TB", f"{sum(vals)/len(vals):.1f}%" if vals else "—")
         if rows:
-            st.dataframe([{"Học viên": r.get("Họ và tên"), "Đại lý": r.get("Đại lý"), "Điểm": r.get("Điểm đạt"), "Tỷ lệ (%)": r.get("Tỷ lệ (%)"), "Trạng thái": r.get("Trạng thái"), "Ôn tập": r.get("Nội dung cần ôn tập cho ngày tiếp theo")} for r in rows], hide_index=True, use_container_width=True)
+            st.dataframe([{"Học viên": r.get("Họ và tên"), "Đại lý": r.get("Đại lý"), "Điểm": round(report_number(r.get("Điểm đạt")), 2), "Tỷ lệ (%)": round(report_number(r.get("Tỷ lệ (%)")), 2), "Trạng thái": r.get("Trạng thái"), "Ôn tập": r.get("Nội dung cần ôn tập cho ngày tiếp theo")} for r in rows], hide_index=True, use_container_width=True)
         else:
             st.info("Chưa có lượt đánh giá.")
         st.stop()
