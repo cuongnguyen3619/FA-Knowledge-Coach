@@ -588,11 +588,15 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             smtp.send_message(message)
 
 def clean_feedback_language(value):
-    """Keep feedback natural without referring to internal grading references."""
+    """Remove references to grading materials from learner-facing comments."""
     result = str(value or "")
-    result = re.sub(r"\\s*(?:như|theo|so với|trong|dựa trên)\\s+(?:nội dung\\s+)?đáp án tham khảo", "", result, flags=re.IGNORECASE)
-    result = re.sub(r"\\s*(?:như|theo|so với|trong)\\s+đáp án mẫu", "", result, flags=re.IGNORECASE)
-    result = re.sub(r"\\s*,\\s*\\.", ".", result)
+    result = re.sub(r"(?:không có|không được đề cập|không nằm) trong đáp án tham khảo",
+                    "cần được kiểm chứng thêm", result, flags=re.IGNORECASE)
+    result = re.sub(r"\\s+(?:như|theo|so với|trong|dựa trên|phù hợp với|tương đương với)\\s+(?:nội dung\\s+)?đáp án (?:tham khảo|mẫu|chuẩn)",
+                    "", result, flags=re.IGNORECASE)
+    result = re.sub(r"đáp án (?:tham khảo|mẫu|chuẩn)", "nội dung trọng tâm",
+                    result, flags=re.IGNORECASE)
+    result = re.sub(r"\\s+([,.])", r"\\1", result)
     result = re.sub(r" {2,}", " ", result)
     return result.strip()
 
