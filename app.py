@@ -776,8 +776,8 @@ student = st.selectbox("Học viên", names)
 student_info = next((x for x in students if norm(x.get("Họ và tên")) == student), {})
 st.caption("Đại lý: " + norm(student_info.get("Đại lý")))
 if role == "Học viên":
-    with st.expander("Email nhận báo cáo"):
-        current_email = norm(student_info.get("Email"))
+    current_email = norm(student_info.get("Email"))
+    with st.expander("Email nhận báo cáo (bắt buộc)", expanded=not bool(current_email)):
         if current_email:
             st.info("Email đã đăng ký: " + current_email + ". Liên hệ Trainer nếu cần thay đổi.")
         else:
@@ -802,6 +802,13 @@ if role == "Học viên":
                         records.clear()
                         st.success("Đã lưu email vào Google Sheets.")
                         st.rerun()
+
+    if not current_email:
+        st.warning("Bạn cần đăng ký email nhận báo cáo trước khi làm bài kiểm tra.")
+        st.stop()
+    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", current_email):
+        st.error("Email đã đăng ký chưa hợp lệ. Vui lòng liên hệ Giảng viên để cập nhật trước khi làm bài.")
+        st.stop()
 
 if mode == "Xem báo cáo học tập":
     # Refresh explicitly to pick up Trainer edits without reloading on every widget interaction.
