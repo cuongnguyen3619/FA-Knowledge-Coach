@@ -216,6 +216,8 @@ def grade_open(question, answer, max_points):
                 "Không đòi hỏi rubric, không thêm tiêu chí hoặc dữ kiện ngoài đáp án tham khảo. "
                 "Trả JSON: ratio (0..1), correct_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
+                "Trong feedback gửi học viên, không dùng cụm từ như trong đáp án tham khảo; "
+                "hãy nhận xét trực tiếp nội dung đúng, thiếu hoặc cần cải thiện. "
                 "Nếu nguồn không đủ hoặc mơ hồ, needs_review=true."
             )},
             {"role": "user", "content": json.dumps({
