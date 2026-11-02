@@ -216,8 +216,9 @@ def grade_open(question, answer, max_points):
                 "Không đòi hỏi rubric, không thêm tiêu chí hoặc dữ kiện ngoài đáp án tham khảo. "
                 "Trả JSON: ratio (0..1), correct_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
-                "Trong feedback gửi học viên, không dùng cụm từ như trong đáp án tham khảo; "
-                "hãy nhận xét trực tiếp nội dung đúng, thiếu hoặc cần cải thiện. "
+                "Viết nhận xét tự nhiên, trực tiếp như giảng viên góp ý cho học viên: nêu điểm làm tốt, "
+                "điểm còn thiếu và gợi ý cải thiện cụ thể. Tuyệt đối không nhắc đến đáp án tham khảo, "
+                "đáp án mẫu, tài liệu đối chiếu hoặc việc so sánh với đáp án trong nội dung feedback. "
                 "Nếu nguồn không đủ hoặc mơ hồ, needs_review=true."
             )},
             {"role": "user", "content": json.dumps({
@@ -226,6 +227,8 @@ def grade_open(question, answer, max_points):
             }, ensure_ascii=False)}
         ])
     data = json.loads(completion.choices[0].message.content)
+    if isinstance(data.get("feedback"), str):
+        data["feedback"] = clean_feedback_language(data["feedback"])
     ratio = min(1.0, max(0.0, float(data.get("ratio", 0))))
     return round(ratio * max_points, 2), data
 
@@ -584,16 +587,30 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             smtp.login(username, password)
             smtp.send_message(message)
 
+def clean_feedback_language(value):
+    """Keep feedback natural without referring to internal grading references."""
+    result = str(value or "")
+    result = re.sub(r"\\s*(?:như|theo|so với|trong|dựa trên)\\s+(?:nội dung\\s+)?đáp án tham khảo", "", result, flags=re.IGNORECASE)
+    result = re.sub(r"\\s*(?:như|theo|so với|trong)\\s+đáp án mẫu", "", result, flags=re.IGNORECASE)
+    result = re.sub(r"\\s*,\\s*\\.", ".", result)
+    result = re.sub(r" {2,}", " ", result)
+    return result.strip()
+
+
 def report_feedback(value):
     """Support both JSON Agent feedback and Trainer-edited plain text."""
     if isinstance(value, dict):
-        return value
-    raw = norm(value)
-    try:
-        obj = json.loads(raw)
-        return obj if isinstance(obj, dict) else {"feedback": raw}
-    except (ValueError, TypeError):
-        return {"feedback": raw}
+        result = value.copy()
+    else:
+        raw = norm(value)
+        try:
+            obj = json.loads(raw)
+            result = obj if isinstance(obj, dict) else {"feedback": raw}
+        except (ValueError, TypeError):
+            result = {"feedback": raw}
+    if isinstance(result.get("feedback"), str):
+        result["feedback"] = clean_feedback_language(result["feedback"])
+    return result
 
 
 def trainer_approved(rows):
