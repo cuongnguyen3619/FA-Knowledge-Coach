@@ -818,6 +818,34 @@ if mode == "Xem báo cáo học tập":
     show_student_report(student, selected_day, history)
     st.stop()
 
+def repeated_unpassed_questions(history, students):
+    """Detect repeated attempts with latest Kết luận still Chưa đạt."""
+    directory = {norm(x.get("Họ và tên")): norm(x.get("Đại lý")) for x in students}
+    groups = {}
+    for index, row in enumerate(history):
+        name, qid, sid = (norm(row.get(k)) for k in ("Họ và tên", "Question ID", "Session ID"))
+        if name and qid and sid:
+            groups.setdefault((name, qid), {})[sid] = (index, row)
+    warnings = []
+    for (name, qid), sessions in groups.items():
+        attempts = [r for _, r in sorted(sessions.values(), key=lambda item: item[0])]
+        failed = [r for r in attempts if norm(r.get("Kết luận")).casefold() == "chưa đạt"]
+        if len(attempts) < 2 or len(failed) < 2:
+            continue
+        if norm(attempts[-1].get("Kết luận")).casefold() != "chưa đạt":
+            continue
+        warnings.append({
+            "Học viên": name, "Đại lý": directory.get(name, ""),
+            "Question ID": qid, "Câu hỏi": norm(attempts[-1].get("Câu hỏi")),
+            "Số lần trả lời": len(attempts), "Số lần chưa đạt": len(failed),
+            "Ngày đánh giá": " → ".join(norm(r.get("Ngày đánh giá")) for r in attempts),
+            "Điểm từng lần": " → ".join(
+                f'{norm(r.get("Điểm đạt"))}/{norm(r.get("Điểm tối đa"))}' for r in attempts),
+            "Kết luận từng lần": " → ".join(norm(r.get("Kết luận")) for r in attempts),
+        })
+    return sorted(warnings, key=lambda r: (-r["Số lần chưa đạt"], r["Học viên"], r["Question ID"]))
+
+
 if mode.startswith("Trainer"):
     if mode == "Trainer – Test học viên":
         st.subheader("Test giao diện học viên")
@@ -905,6 +933,9 @@ if mode.startswith("Trainer"):
             st.dataframe([{"Học viên": r.get("Họ và tên"), "Đại lý": r.get("Đại lý"), "Điểm": round(report_number(r.get("Điểm đạt")), 2), "Tỷ lệ (%)": round(report_number(r.get("Tỷ lệ (%)")), 2), "Trạng thái": r.get("Trạng thái"), "Ôn tập": r.get("Nội dung cần ôn tập cho ngày tiếp theo")} for r in rows], hide_index=True, use_container_width=True)
         else:
             st.info("Chưa có lượt đánh giá.")
+        repeat_alerts = repeated_unpassed_questions(history, students)
+        if repeat_alerts:
+            st.warning(f"⚠️ {len(repeat_alerts)} câu hỏi của {len({r['Học viên'] for r in repeat_alerts})} học viên vẫn chưa đạt sau ít nhất 2 lần. Xem Trainer – Cảnh báo để biết chi tiết.")
         st.stop()
     if mode == "Trainer – Duyệt & gửi tất cả":
         st.subheader(f"Phê duyệt và gửi kết quả – Ngày {selected_day}")
@@ -977,11 +1008,23 @@ if mode.startswith("Trainer"):
                 st.warning("Có thể email đã được gửi nhưng trạng thái lưu thất bại. Kiểm tra trước khi thử lại để tránh gửi trùng.")
         st.stop()
     if mode == "Trainer – Cảnh báo":
-        warnings = trainer_warnings(student, history)
-        st.metric("Câu có ít nhất 2 lần không đạt", len(warnings))
-        for qid, attempts in warnings.items():
-            st.warning(f"{qid}: {len(attempts)} lần dưới 50%")
-            st.write(bank.get(qid, {}).get("Câu hỏi", ""))
+        st.subheader("Cảnh báo câu hỏi chưa đạt nhiều lần")
+        st.caption("Toàn bộ học viên, mọi ngày đánh giá. Cùng Question ID, ít nhất 2 session kết luận 'Chưa đạt' và lần trả lời gần nhất vẫn 'Chưa đạt' (cột N – Kết luận).")
+        if st.button("Làm mới cảnh báo"):
+            records.clear()
+            st.rerun()
+        warnings = repeated_unpassed_questions(history, students)
+        a, b, c = st.columns(3)
+        a.metric("Học viên cần hỗ trợ", len({r["Học viên"] for r in warnings}))
+        b.metric("Câu hỏi cảnh báo", len(warnings))
+        c.metric("Không đạt ≥3 lần", sum(r["Số lần chưa đạt"] >= 3 for r in warnings))
+        if warnings:
+            st.warning(f"Có {len(warnings)} trường hợp cần Trainer hỗ trợ ôn tập.")
+            student_filter = st.selectbox("Lọc học viên", ["Tất cả"] + sorted({r["Học viên"] for r in warnings}), key="warning_student")
+            visible = [r for r in warnings if student_filter == "Tất cả" or r["Học viên"] == student_filter]
+            st.dataframe(visible, hide_index=True, use_container_width=True)
+        else:
+            st.success("Không có câu hỏi nào chưa đạt lặp lại từ 2 lần và vẫn chưa đạt ở lần mới nhất.")
         st.stop()
     for lev, count in LEVEL_COUNTS.items():
         eligible = [q for q in bank.values() if 1 <= day(q) <= selected_day and level(q) == lev and approved(q) and (lev == 1 or norm(q.get("Đáp án tham khảo")))]
