@@ -806,7 +806,7 @@ if role == "Học viên":
     if not current_email:
         st.warning("Bạn cần đăng ký email nhận báo cáo trước khi làm bài kiểm tra.")
         st.stop()
-    if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", current_email):
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", current_email):
         st.error("Email đã đăng ký chưa hợp lệ. Vui lòng liên hệ Giảng viên để cập nhật trước khi làm bài.")
         st.stop()
 
@@ -945,7 +945,7 @@ if mode.startswith("Trainer"):
             if not sent:
                 pending.append((name, email, batch))
         st.caption(f"{len(batches)} học viên đã nộp · {len(pending)} học viên chưa nhận email.")
-        missing = [name for name, email, _ in pending if not re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", email)]
+        missing = [name for name, email, _ in pending if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)]
         if missing:
             st.warning("Thiếu email hợp lệ: " + ", ".join(missing) + ". Cập nhật tab Học viên trước khi duyệt.")
         confirmed = st.checkbox("Tôi đã rà soát nhận xét và xác nhận công bố, gửi email cho tất cả học viên chưa nhận.")
