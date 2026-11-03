@@ -487,6 +487,11 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
     port = int(st.secrets.get("SMTP_PORT", 465))
     if not all((host, username, password)):
         raise RuntimeError("Cần cấu hình SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD trong Streamlit Secrets")
+    # Use all recorded sessions, not just the current report, for repeat warnings.
+    repeat_alerts = [
+        item for item in repeated_unpassed_questions(records("Câu trả lời"), records("Học viên"))
+        if item["Học viên"] == student
+    ]
     # Google Sheets may return Vietnamese decimals as "1,6".
     # Only the 13 new questions contribute to the 32-point total.
     earned = sum(report_number(r.get("Điểm đạt")) for r in rows
@@ -496,6 +501,11 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
     lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
              f"Học viên: {student}", f"Đại lý: {dealer}", f"Điểm: {earned:g}/{maximum:g}", "",
              "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.", ""]
+    if repeat_alerts:
+        lines.extend(["", "KIẾN THỨC CẦN ƯU TIÊN ÔN TẬP"])
+        for alert in repeat_alerts:
+            lines.append(f'- {alert["Câu hỏi"]} ({alert["Số lần chưa đạt"]} lần chưa đạt; điểm: {alert["Điểm từng lần"]})')
+        lines.append("")
     for i, r in enumerate(rows, 1):
         qid = norm(r.get("Question ID"))
         q = bank.get(qid, {})
@@ -555,6 +565,21 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             f'<h3 style="margin:0 0 14px;color:#123b70;font-size:17px;line-height:1.45">'
             f'Câu {i}. {h(r.get("Câu hỏi"))}</h3>{detail}</div>'
         )
+    review_html = ""
+    if repeat_alerts:
+        review_items = "".join(
+            '<li style="margin:10px 0"><strong>' + h(item["Câu hỏi"]) + '</strong>'
+            + '<div style="margin-top:4px">Chưa đạt: ' + str(item["Số lần chưa đạt"])
+            + ' lần · Điểm từng lần: ' + h(item["Điểm từng lần"]) + '</div></li>'
+            for item in repeat_alerts
+        )
+        review_html = (
+            '<div style="padding:16px;background:#fff7ed;border:1px solid #fdba74;'
+            'border-radius:8px;margin:16px 0;line-height:1.6">'
+            '<strong style="color:#9a3412">Kiến thức cần ưu tiên ôn tập</strong>'
+            '<p>Những câu hỏi đã trả lời nhiều lần nhưng lần gần nhất vẫn chưa đạt:</p>'
+            '<ol style="padding-left:20px;margin:8px 0">' + review_items + '</ol></div>'
+        )
     html_body = (
         '<html><body style="margin:0;padding:24px 12px;background:#f5f7fb;'
         'font-family:Arial,Helvetica,sans-serif;color:#1e293b">'
@@ -568,7 +593,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
         '<div style="padding:16px;background:#eaf2fc;border-radius:8px;margin:16px 0;line-height:1.6">'
         '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
         'các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.</div>'
-        + "".join(sections) + '</div></body></html>'
+        + review_html + "".join(sections) + '</div></body></html>'
     )
     message = EmailMessage()
     message["Subject"] = f"FA Knowledge Coach - Báo cáo Ngày {selected_day} - {student}"
