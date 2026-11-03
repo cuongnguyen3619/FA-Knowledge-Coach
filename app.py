@@ -843,6 +843,73 @@ if mode == "Xem báo cáo học tập":
     show_student_report(student, selected_day, history)
     st.stop()
 
+def learner_progress_data(attempts, answer_history, students):
+    """Latest completed attempt per training day; repeated-question recovery by session order."""
+    directory = {norm(x.get("Họ và tên")): norm(x.get("Đại lý")) for x in students}
+    daily = {}
+    for index, row in enumerate(attempts):
+        name = norm(row.get("Họ và tên"))
+        raw_day = norm(row.get("Ngày đánh giá")).replace("Ngày ", "")
+        if not name or raw_day not in ("1", "2", "3", "4"):
+            continue
+        if norm(row.get("Trạng thái")).casefold() not in ("completed", "hoàn thành"):
+            continue
+        daily[(name, int(raw_day))] = (index, row)
+    by_student = {}
+    for (name, training_day), (_, row) in daily.items():
+        by_student.setdefault(name, {})[training_day] = row
+
+    question_history = {}
+    for row in answer_history:
+        name, qid, sid = (norm(row.get(key)) for key in ("Họ và tên", "Question ID", "Session ID"))
+        if name and qid and sid:
+            question_history.setdefault((name, qid), {})[sid] = row
+
+    recovered = {}
+    unresolved = {}
+    for (name, _), sessions in question_history.items():
+        entries = list(sessions.values())
+        if len(entries) < 2:
+            continue
+        statuses = [norm(x.get("Kết luận")).casefold() for x in entries]
+        if statuses[-1] == "đạt" and "chưa đạt" in statuses[:-1]:
+            recovered[name] = recovered.get(name, 0) + 1
+        if statuses[-1] == "chưa đạt" and statuses.count("chưa đạt") >= 2:
+            unresolved[name] = unresolved.get(name, 0) + 1
+
+    result = []
+    for name, days in sorted(by_student.items()):
+        ordered = sorted(days)
+        first, last = days[ordered[0]], days[ordered[-1]]
+        first_pct = report_number(first.get("Tỷ lệ (%)"))
+        last_pct = report_number(last.get("Tỷ lệ (%)"))
+        delta = last_pct - first_pct if len(ordered) >= 2 else None
+        if delta is None:
+            trend = "Chưa đủ dữ liệu"
+        elif delta >= 5:
+            trend = "Tiến bộ"
+        elif delta <= -5:
+            trend = "Cần hỗ trợ"
+        else:
+            trend = "Ổn định"
+        result.append({
+            "Học viên": name, "Đại lý": directory.get(name, norm(last.get("Đại lý"))),
+            "Số ngày đã học": len(ordered),
+            "Ngày 1 (%)": round(report_number(days[1].get("Tỷ lệ (%)")), 1) if 1 in days else None,
+            "Ngày 2 (%)": round(report_number(days[2].get("Tỷ lệ (%)")), 1) if 2 in days else None,
+            "Ngày 3 (%)": round(report_number(days[3].get("Tỷ lệ (%)")), 1) if 3 in days else None,
+            "Ngày 4 (%)": round(report_number(days[4].get("Tỷ lệ (%)")), 1) if 4 in days else None,
+            "Thay đổi (điểm %)": round(delta, 1) if delta is not None else None,
+            "L2 thay đổi": round(report_number(last.get("Điểm Level 2 (%)")) - report_number(first.get("Điểm Level 2 (%)")), 1) if delta is not None else None,
+            "L3 thay đổi": round(report_number(last.get("Điểm Level 3 (%)")) - report_number(first.get("Điểm Level 3 (%)")), 1) if delta is not None else None,
+            "L4 thay đổi": round(report_number(last.get("Điểm Level 4 (%)")) - report_number(first.get("Điểm Level 4 (%)")), 1) if delta is not None else None,
+            "Đã khắc phục": recovered.get(name, 0),
+            "Chưa khắc phục": unresolved.get(name, 0),
+            "Xu hướng": trend,
+        })
+    return result
+
+
 def repeated_unpassed_questions(history, students):
     """Detect repeated attempts with latest Kết luận still Chưa đạt."""
     directory = {norm(x.get("Họ và tên")): norm(x.get("Đại lý")) for x in students}
@@ -958,6 +1025,29 @@ if mode.startswith("Trainer"):
             st.dataframe([{"Học viên": r.get("Họ và tên"), "Đại lý": r.get("Đại lý"), "Điểm": round(report_number(r.get("Điểm đạt")), 2), "Tỷ lệ (%)": round(report_number(r.get("Tỷ lệ (%)")), 2), "Trạng thái": r.get("Trạng thái"), "Ôn tập": r.get("Nội dung cần ôn tập cho ngày tiếp theo")} for r in rows], hide_index=True, use_container_width=True)
         else:
             st.info("Chưa có lượt đánh giá.")
+        st.divider()
+        st.subheader("Theo dõi tiến bộ học viên")
+        st.caption("So sánh lượt hoàn thành mới nhất của mỗi ngày đào tạo. Chênh lệch điểm tính bằng điểm phần trăm; các ngày có bộ câu hỏi khác nhau nên đây là chỉ báo tham khảo.")
+        progress = learner_progress_data(records("Lượt đánh giá"), history, students)
+        if progress:
+            a, b, c, d = st.columns(4)
+            a.metric("Có từ 2 ngày", sum(r["Số ngày đã học"] >= 2 for r in progress))
+            b.metric("Tiến bộ", sum(r["Xu hướng"] == "Tiến bộ" for r in progress))
+            c.metric("Cần hỗ trợ", sum(r["Xu hướng"] == "Cần hỗ trợ" for r in progress))
+            d.metric("Câu đã khắc phục", sum(r["Đã khắc phục"] for r in progress))
+            st.dataframe(progress, hide_index=True, use_container_width=True)
+            selected_learner = st.selectbox("Xem tiến bộ chi tiết", [r["Học viên"] for r in progress], key="progress_learner")
+            detail = next(r for r in progress if r["Học viên"] == selected_learner)
+            day_scores = {f"Ngày {d}": detail[f"Ngày {d} (%)"] for d in range(1, 5) if detail[f"Ngày {d} (%)"] is not None}
+            if len(day_scores) >= 2:
+                st.line_chart(day_scores, y_label="Điểm (%)")
+            else:
+                st.info("Học viên mới có kết quả một ngày; cần ít nhất hai ngày để xác định xu hướng.")
+            st.write(f'**{detail["Xu hướng"]}** · Đã khắc phục: {detail["Đã khắc phục"]} câu · Vẫn chưa khắc phục: {detail["Chưa khắc phục"]} câu')
+            if detail["Thay đổi (điểm %)"] is not None:
+                st.caption(f'Thay đổi Level 2: {detail["L2 thay đổi"]:+g} điểm % · Level 3: {detail["L3 thay đổi"]:+g} điểm % · Level 4: {detail["L4 thay đổi"]:+g} điểm %')
+        else:
+            st.info("Chưa có dữ liệu để theo dõi tiến bộ.")
         repeat_alerts = repeated_unpassed_questions(history, students)
         if repeat_alerts:
             st.warning(f"⚠️ {len(repeat_alerts)} câu hỏi của {len({r['Học viên'] for r in repeat_alerts})} học viên vẫn chưa đạt sau ít nhất 2 lần. Xem Trainer – Cảnh báo để biết chi tiết.")
