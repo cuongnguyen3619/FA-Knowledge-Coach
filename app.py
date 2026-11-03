@@ -1040,7 +1040,7 @@ if mode.startswith("Trainer"):
             detail = next(r for r in progress if r["Học viên"] == selected_learner)
             day_scores = {f"Ngày {d}": detail[f"Ngày {d} (%)"] for d in range(1, 5) if detail[f"Ngày {d} (%)"] is not None}
             if len(day_scores) >= 2:
-                st.line_chart(day_scores, y_label="Điểm (%)")
+                st.line_chart([{"Ngày": day, "Điểm (%)": score} for day, score in day_scores.items()], x="Ngày", y="Điểm (%)")
             else:
                 st.info("Học viên mới có kết quả một ngày; cần ít nhất hai ngày để xác định xu hướng.")
             st.write(f'**{detail["Xu hướng"]}** · Đã khắc phục: {detail["Đã khắc phục"]} câu · Vẫn chưa khắc phục: {detail["Chưa khắc phục"]} câu')
