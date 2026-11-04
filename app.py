@@ -1114,27 +1114,47 @@ if mode.startswith("Trainer"):
         st.stop()
     if mode == "Trainer – Chấm sau 17h":
         st.subheader("Chấm bài đã nộp sau 17:00")
-        st.caption("Bài nộp được lưu A:I ngay; Trainer chạy chấm theo lô sau 17:00. Không cần học viên mở lại trang.")
-        pending = [r for r in retry_sheets(lambda: records("Bài kiểm tra"))
-                   if norm(r.get("Trạng thái")) == "Chờ chấm"
-                   and norm(r.get("Ngày")) == str(selected_day)]
-        st.metric("Bài chờ chấm", len(pending))
-        if datetime.now(TZ).hour < 17:
-            st.warning("Chỉ cho phép chấm từ 17:00 (giờ Việt Nam).")
-        elif pending and st.button("Chấm tất cả bài đang chờ", type="primary"):
-            successes, failures = [], []
-            for item in pending:
+        st.caption("Trainer chỉ bấm một lần. Hệ thống lần lượt chấm, lưu từng bài và tự chuyển sang bài tiếp theo.")
+        batch_key = f"grading_batch:{selected_day}"
+        batch = st.session_state.get(batch_key)
+        if batch is None:
+            pending = [r for r in retry_sheets(lambda: records("Bài kiểm tra"))
+                       if norm(r.get("Trạng thái")) == "Chờ chấm"
+                       and norm(r.get("Ngày")) == str(selected_day)]
+            st.metric("Bài chờ chấm", len(pending))
+            if datetime.now(TZ).hour < 17:
+                st.warning("Chỉ cho phép chấm từ 17:00 (giờ Việt Nam).")
+            elif pending and st.button("Chấm tất cả bài đang chờ", type="primary"):
+                st.session_state[batch_key] = {
+                    "queue": pending, "index": 0, "successes": [], "failures": []
+                }
+                st.rerun()
+        else:
+            total = len(batch["queue"])
+            index = batch["index"]
+            st.progress(index / total if total else 1.0,
+                        text=f"Đã xử lý {index}/{total} bài")
+            if index < total:
+                item = batch["queue"][index]
+                st.info(f"Đang chấm bài {index+1}/{total}: {norm(item.get('Học viên'))}")
                 try:
                     grade_pending_session(item, bank, students)
-                    successes.append(norm(item.get("Học viên")))
+                    batch["successes"].append(norm(item.get("Học viên")))
                 except Exception as exc:
-                    failures.append((norm(item.get("Học viên")), str(exc)))
-            records.clear()
-            st.success(f"Đã chấm và lưu: {len(successes)} bài.")
-            for name, error in failures:
+                    batch["failures"].append((norm(item.get("Học viên")), str(exc)))
+                finally:
+                    batch["index"] += 1
+                records.clear()
+                st.rerun()
+            st.success(f"Hoàn tất lượt chấm: {len(batch['successes'])}/{total} bài đã lưu kết quả.")
+            for name, error in batch["failures"]:
                 st.error(f"{name}: {error}")
-            if failures:
-                st.info("Các bài lỗi vẫn ở trạng thái Chờ chấm để thử lại.")
+            if batch["failures"]:
+                st.warning("Bài lỗi vẫn ở trạng thái Chờ chấm; cần kiểm tra và chạy lại sau khi xử lý lỗi.")
+            if st.button("Đóng kết quả chấm"):
+                del st.session_state[batch_key]
+                st.rerun()
+            st.caption("Giữ trang Trainer mở cho đến khi hoàn tất. Nếu mất kết nối, các bài đã lưu vẫn được giữ lại.")
         st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
