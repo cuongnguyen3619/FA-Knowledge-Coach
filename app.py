@@ -349,11 +349,62 @@ def retry_sheets(action, attempts=5):
                 raise
             time.sleep(min(2 ** i + random.random(), 16))
 
-def get_initial_data():
-    return (retry_sheets(lambda: records("Học viên")),
-            retry_sheets(question_bank),
-            retry_sheets(lambda: records("Câu trả lời")),
-            retry_sheets(lambda: records("Bài kiểm tra")))
+def get_initial_data(role="Học viên"):
+    # Trainer-only historical data is loaded only when required.
+    students = retry_sheets(lambda: records("Học viên"))
+    bank = retry_sheets(question_bank)
+    history = retry_sheets(lambda: records("Câu trả lời")) if role == "Trainer" else []
+    assignments = retry_sheets(lambda: records("Bài kiểm tra"))
+    return students, bank, history, assignments
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_course_values():
+    return retry_sheets(lambda: sheet("Khóa học").get_all_values())
+
+def save_raw_answers(sid, student, selected_day, order, bank, responses):
+    """Persist and verify A:I before any AI call; never overwrite existing raw answers."""
+    ws = sheet("Câu trả lời")
+    values = retry_sheets(lambda: ws.get_all_values())
+    headers = values[0] if values else []
+    expected = ["Session ID", "Họ và tên", "Ngày đánh giá", "Question ID",
+                "Ngày khóa học", "Module", "Level", "Câu hỏi", "Nội dung trả lời học viên"]
+    if headers[:9] != expected:
+        raise RuntimeError("Cấu trúc A:I của tab Câu trả lời đã thay đổi; dừng để bảo vệ dữ liệu.")
+    existing = {}
+    for idx, row in enumerate(values[1:], 2):
+        if row and row[0] == sid and len(row) > 3:
+            existing.setdefault(row[3], []).append((idx, row))
+    ids = [item["id"] for item in order]
+    if len(ids) != len(set(ids)):
+        raise RuntimeError("Bộ đề chứa Question ID trùng.")
+    if any(len(existing.get(qid, [])) > 1 for qid in ids):
+        raise RuntimeError("Có câu trả lời trùng trong Session ID; cần Trainer kiểm tra.")
+    for item in order:
+        qid = item["id"]
+        if qid in existing:
+            saved = existing[qid][0][1]
+            if len(saved) < 9 or saved[8] != responses[qid]:
+                raise RuntimeError(f"Câu {qid} đã lưu với nội dung khác; không ghi đè.")
+    missing = [item for item in order if item["id"] not in existing]
+    if missing:
+        rows = []
+        for item in missing:
+            q = bank[item["id"]]
+            rows.append([sid, student, str(selected_day), item["id"],
+                         q.get("Ngày nội dung", ""), q.get("Module", ""),
+                         level(q), q.get("Câu hỏi", ""), responses[item["id"]]])
+        retry_sheets(lambda: ws.append_rows(rows, value_input_option="RAW"))
+    # Read-after-write verification, including every original answer.
+    check = retry_sheets(lambda: ws.get_all_values())
+    found = {}
+    for row in check[1:]:
+        if row and row[0] == sid and len(row) > 3:
+            found.setdefault(row[3], []).append(row)
+    if set(found) != set(ids) or any(len(found[qid]) != 1 or
+       len(found[qid][0]) < 9 or found[qid][0][8] != responses[qid] for qid in ids):
+        raise RuntimeError("Chưa xác nhận lưu đủ câu trả lời; có thể thử đồng bộ lại.")
+    records.clear()
+    return True
 
 def grade_submission(student, selected_day, order, bank, responses, sid):
     output = []
@@ -423,22 +474,41 @@ def learning_journey(results):
 
 
 def commit_results(sid, student, selected_day, order, results, students):
-    # Idempotency check prevents duplicate answer rows after retry/reconnect.
-    # For strict concurrent idempotency use a transactional database.
+    # A:I was persisted before grading. Update J:S in the SAME rows.
     ws = sheet("Câu trả lời")
     existing = retry_sheets(lambda: ws.get_all_values())
     headers = existing[0] if existing else []
-    if not headers:
-        raise RuntimeError("Tab Câu trả lời thiếu hàng tiêu đề")
-    if "Session ID" not in headers:
-        raise RuntimeError("Tab Câu trả lời thiếu cột Session ID")
-    sid_col = headers.index("Session ID")
-    already = any(len(row) > sid_col and row[sid_col] == sid for row in existing[1:])
-    if not already:
-        # Use sheet header mapping, preserving existing column layout.
-        journey = learning_journey(results)
-        data = [[r.get(h, "") for h in headers] for r in results]
-        retry_sheets(lambda: ws.append_rows(data, value_input_option="RAW"))
+    expected_ids = {item["id"] for item in order}
+    indexed = {}
+    for idx, row in enumerate(existing[1:], 2):
+        if row and row[0] == sid and len(row) > 3:
+            indexed.setdefault(row[3], []).append((idx, row))
+    if set(indexed) != expected_ids or any(len(v) != 1 for v in indexed.values()):
+        raise RuntimeError("Thiếu hoặc trùng câu trả lời gốc; không ghi điểm tổng hợp.")
+    if headers[:9] != ["Session ID", "Họ và tên", "Ngày đánh giá", "Question ID",
+                        "Ngày khóa học", "Module", "Level", "Câu hỏi", "Nội dung trả lời học viên"]:
+        raise RuntimeError("Cấu trúc A:I đã thay đổi.")
+    updates = []
+    for result in results:
+        qid = result["Question ID"]
+        idx, original = indexed[qid][0]
+        if len(original) < 9 or original[8] != result["Nội dung trả lời học viên"]:
+            raise RuntimeError(f"Câu trả lời gốc {qid} không khớp; dừng chấm.")
+        # Keep existing J:S column layout and Trainer review state on retries.
+        graded = [result.get(h, "") for h in headers[9:]]
+        if len(original) > 17 and norm(original[17]).casefold() == "trainer approved":
+            continue
+        updates.append({"range": f"J{idx}:{gspread.utils.rowcol_to_a1(idx, len(headers))}",
+                        "values": [graded]})
+    if updates:
+        retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
+    verified = retry_sheets(lambda: ws.get_all_values())
+    for qid, entries in indexed.items():
+        idx = entries[0][0]
+        row = verified[idx-1]
+        if len(row) < 14 or not norm(row[11]) or not norm(row[12]):
+            raise RuntimeError(f"Chưa xác minh điểm của câu {qid}.")
+    records.clear()
     fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
     aws = sheet("Bài kiểm tra")
     assignment_rows = retry_sheets(lambda: aws.get_all_values())
@@ -744,7 +814,7 @@ def show_student_report(student, selected_day, history):
 
 # Avoid loading data on every widget change: the full assessment uses one st.form.
 try:
-    students, bank, history, assignments = get_initial_data()
+    students, bank, history, assignments = get_initial_data("Trainer" if st.session_state.get("fa_role") == "Trainer" else "Học viên")
 except Exception as exc:
     st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
     st.exception(exc)
@@ -753,7 +823,7 @@ except Exception as exc:
 def course_window():
     now = datetime.now(TZ)
     schedule = []
-    for row in retry_sheets(lambda: sheet("Khóa học").get_all_values())[1:]:
+    for row in cached_course_values()[1:]:
         if len(row) < 4:
             continue
         match = re.search(r"(\d+)", norm(row[0]))
@@ -774,7 +844,7 @@ def course_window():
 
 
 with st.sidebar:
-    role = st.radio("Giao diện", ["Học viên", "Trainer"])
+    role = st.radio("Giao diện", ["Học viên", "Trainer"], key="fa_role")
     if role == "Trainer":
         password = st.secrets.get("TRAINER_PASSWORD")
         if not password or st.text_input("Mật khẩu Trainer", type="password") != password:
@@ -1163,6 +1233,8 @@ if key not in st.session_state:
         completed = {norm(x.get("Question ID")): x for x in history if norm(x.get("Session ID")) == sid}
         st.success("Đã hoàn thành bài kiểm tra. Kết quả sẽ được thông báo sau.")
         st.stop()
+    if not history:
+        history = retry_sheets(lambda: records("Câu trả lời"))
     proposed, shortage = build_assignment(student, selected_day, bank, history)
     if shortage:
         st.error("Không đủ câu hỏi hợp lệ để tạo bài kiểm tra")
@@ -1210,8 +1282,21 @@ if exam["status"] == "taking":
             st.warning("Bạn còn câu chưa trả lời. Vui lòng hoàn thành trước khi nộp.")
             st.stop()
         exam["responses"] = responses
-        exam["status"] = "grading"
+        exam["status"] = "raw_saving"
         st.rerun()
+    st.stop()
+
+if exam["status"] == "raw_saving":
+    with st.spinner("Đang lưu và xác minh câu trả lời gốc..."):
+        try:
+            save_raw_answers(exam["sid"], student, selected_day, order, bank, exam["responses"])
+            exam["status"] = "grading"
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Chưa xác nhận lưu bài: {exc}")
+            st.warning("Không đóng trang. Bấm thử lại để xác minh hoặc tiếp tục lưu.")
+            if st.button("Thử lưu lại câu trả lời"):
+                st.rerun()
     st.stop()
 
 if exam["status"] == "grading":
