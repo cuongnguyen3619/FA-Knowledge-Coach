@@ -406,6 +406,46 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
     records.clear()
     return True
 
+def queue_submission(sid, student, selected_day, order):
+    """Durably mark an exam as submitted; grading runs later in Trainer mode."""
+    ws = sheet("Bài kiểm tra")
+    values = retry_sheets(lambda: ws.get_all_values())
+    matches = [(i, row) for i, row in enumerate(values[1:], 2) if row and row[0] == sid]
+    if len(matches) > 1:
+        raise RuntimeError("Session ID trùng trong Bài kiểm tra.")
+    if matches:
+        row_num, row = matches[0]
+        if len(row) > 3 and row[3] in ("Chờ chấm", "Hoàn thành"):
+            return
+        raise RuntimeError("Trạng thái bài kiểm tra chưa hợp lệ.")
+    data = [sid, student, selected_day, "Chờ chấm", timestamp(), timestamp(),
+            json.dumps(order, ensure_ascii=False), 13, len(order)-13, "", 32, timestamp()]
+    retry_sheets(lambda: ws.append_row(data, value_input_option="RAW"))
+    confirmed = retry_sheets(lambda: ws.get_all_values())
+    if sum(1 for row in confirmed[1:] if row and row[0] == sid and len(row) > 3
+           and row[3] == "Chờ chấm") != 1:
+        raise RuntimeError("Chưa xác nhận trạng thái Chờ chấm.")
+    records.clear()
+
+
+def grade_pending_session(assignment, bank, students):
+    sid = norm(assignment.get("Session ID"))
+    student = norm(assignment.get("Học viên"))
+    selected_day = int(assignment.get("Ngày"))
+    order = json.loads(assignment.get("Danh sách câu JSON") or "[]")
+    raw = retry_sheets(lambda: sheet("Câu trả lời").get_all_records(
+        default_blank="", numericise_ignore=["all"]))
+    matched = [r for r in raw if norm(r.get("Session ID")) == sid]
+    ids = [item["id"] for item in order]
+    if not ids or len(ids) != len(set(ids)) or len(matched) != len(ids):
+        raise RuntimeError("Số câu trả lời gốc không khớp với bộ đề.")
+    responses = {norm(r.get("Question ID")): norm(r.get("Nội dung trả lời học viên")) for r in matched}
+    if set(responses) != set(ids) or any(not responses[qid] for qid in ids):
+        raise RuntimeError("Thiếu hoặc trùng Question ID / câu trả lời.")
+    results = grade_submission(student, selected_day, order, bank, responses, sid)
+    return commit_results(sid, student, selected_day, order, results, students)
+
+
 def grade_submission(student, selected_day, order, bank, responses, sid):
     output = []
     for item in order:
@@ -841,7 +881,7 @@ with st.sidebar:
         password = st.secrets.get("TRAINER_PASSWORD")
         if not password or st.text_input("Mật khẩu Trainer", type="password") != password:
             st.stop()
-        mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Test học viên", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
+        mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Chấm sau 17h", "Trainer – Test học viên", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
     else:
         mode = "Làm bài kiểm tra"
     if role == "Trainer":
@@ -1072,6 +1112,30 @@ if mode.startswith("Trainer"):
                 del st.session_state[test_key]
                 st.rerun()
         st.stop()
+    if mode == "Trainer – Chấm sau 17h":
+        st.subheader("Chấm bài đã nộp sau 17:00")
+        st.caption("Bài nộp được lưu A:I ngay; Trainer chạy chấm theo lô sau 17:00. Không cần học viên mở lại trang.")
+        pending = [r for r in retry_sheets(lambda: records("Bài kiểm tra"))
+                   if norm(r.get("Trạng thái")) == "Chờ chấm"
+                   and norm(r.get("Ngày")) == str(selected_day)]
+        st.metric("Bài chờ chấm", len(pending))
+        if datetime.now(TZ).hour < 17:
+            st.warning("Chỉ cho phép chấm từ 17:00 (giờ Việt Nam).")
+        elif pending and st.button("Chấm tất cả bài đang chờ", type="primary"):
+            successes, failures = [], []
+            for item in pending:
+                try:
+                    grade_pending_session(item, bank, students)
+                    successes.append(norm(item.get("Học viên")))
+                except Exception as exc:
+                    failures.append((norm(item.get("Học viên")), str(exc)))
+            records.clear()
+            st.success(f"Đã chấm và lưu: {len(successes)} bài.")
+            for name, error in failures:
+                st.error(f"{name}: {error}")
+            if failures:
+                st.info("Các bài lỗi vẫn ở trạng thái Chờ chấm để thử lại.")
+        st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
         if st.button("Làm mới dữ liệu"):
@@ -1290,13 +1354,18 @@ if exam["status"] == "raw_saving":
     with st.spinner("Đang lưu và xác minh câu trả lời gốc..."):
         try:
             save_raw_answers(exam["sid"], student, selected_day, order, bank, exam["responses"])
-            exam["status"] = "grading"
+            queue_submission(exam["sid"], student, selected_day, order)
+            exam["status"] = "queued"
             st.rerun()
         except Exception as exc:
             st.error(f"Chưa xác nhận lưu bài: {exc}")
             st.warning("Không đóng trang. Bấm thử lại để xác minh hoặc tiếp tục lưu.")
             if st.button("Thử lưu lại câu trả lời"):
                 st.rerun()
+    st.stop()
+
+if exam["status"] == "queued":
+    st.success("Đã lưu đầy đủ câu trả lời. Hệ thống sẽ chấm sau 17:00 khi Trainer chạy chấm theo lô.")
     st.stop()
 
 if exam["status"] == "grading":
