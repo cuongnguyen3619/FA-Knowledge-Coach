@@ -353,7 +353,7 @@ def get_initial_data(role="Học viên"):
     # Trainer-only historical data is loaded only when required.
     students = retry_sheets(lambda: records("Học viên"))
     bank = retry_sheets(question_bank)
-    history = []  # Reports and review screens fetch answer history only when needed.
+    history = retry_sheets(lambda: records("Câu trả lời")) if role == "Trainer" else []
     assignments = retry_sheets(lambda: records("Bài kiểm tra"))
     return students, bank, history, assignments
 
@@ -897,7 +897,7 @@ with st.sidebar:
 
 # Avoid loading data on every widget change: the full assessment uses one st.form.
 try:
-    students, bank, history, assignments = get_initial_data("Trainer" if st.session_state.get("fa_role") == "Trainer" else "Học viên")
+    students, bank, history, assignments = get_initial_data("Trainer" if role == "Trainer" and (mode != "Trainer – Dashboard" or st.session_state.get(f"trainer_report_requested:{selected_day}", False)) else "Học viên")
 except Exception as exc:
     st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
     st.exception(exc)
