@@ -353,7 +353,7 @@ def get_initial_data(role="Học viên"):
     # Trainer-only historical data is loaded only when required.
     students = retry_sheets(lambda: records("Học viên"))
     bank = retry_sheets(question_bank)
-    history = retry_sheets(lambda: records("Câu trả lời")) if role == "Trainer" else []
+    history = []  # Reports and review screens fetch answer history only when needed.
     assignments = retry_sheets(lambda: records("Bài kiểm tra"))
     return students, bank, history, assignments
 
@@ -1158,9 +1158,18 @@ if mode.startswith("Trainer"):
         st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
-        if st.button("Làm mới dữ liệu"):
+        st.caption("Dữ liệu báo cáo chỉ được tải và tổng hợp khi Trainer yêu cầu.")
+        report_key = f"trainer_report_requested:{selected_day}"
+        if st.button("Tạo báo cáo", type="primary"):
+            records.clear()
+            st.session_state[report_key] = True
+        if not st.session_state.get(report_key, False):
+            st.info("Bấm Tạo báo cáo để xem tổng quan lớp và tiến bộ học viên.")
+            st.stop()
+        if st.button("Làm mới báo cáo"):
             records.clear()
             st.rerun()
+        history = retry_sheets(lambda: records("Câu trả lời"))
         latest = {}
         for r in records("Lượt đánh giá"):
             if norm(r.get("Ngày đánh giá")) == str(selected_day):
