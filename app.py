@@ -812,14 +812,6 @@ def show_student_report(student, selected_day, history):
                 st.caption("Cần ôn: " + norm(r.get("Kiến thức cần ôn tập")))
 
 
-# Avoid loading data on every widget change: the full assessment uses one st.form.
-try:
-    students, bank, history, assignments = get_initial_data("Trainer" if st.session_state.get("fa_role") == "Trainer" else "Học viên")
-except Exception as exc:
-    st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
-    st.exception(exc)
-    st.stop()
-
 def course_window():
     now = datetime.now(TZ)
     schedule = []
@@ -862,6 +854,14 @@ with st.sidebar:
             st.error(f"Lịch kiểm tra chưa hợp lệ: {exc}")
             st.stop()
         selected_day = active_window[0] if active_window else None
+
+# Avoid loading data on every widget change: the full assessment uses one st.form.
+try:
+    students, bank, history, assignments = get_initial_data("Trainer" if st.session_state.get("fa_role") == "Trainer" else "Học viên")
+except Exception as exc:
+    st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
+    st.exception(exc)
+    st.stop()
 
 names = [norm(x.get("Họ và tên")) for x in students if norm(x.get("Họ và tên"))]
 if not names:
