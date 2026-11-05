@@ -361,6 +361,19 @@ def get_initial_data(role="Học viên"):
 def cached_course_values():
     return retry_sheets(lambda: sheet("Khóa học").get_all_values())
 
+def append_data_rows(ws, rows):
+    """Append after the sheet's last data row, without logical-table detection.
+
+    Do not retry this non-idempotent operation blindly; callers re-read IDs.
+    """
+    ws.spreadsheet.batch_update({"requests": [{"appendCells": {
+        "sheetId": ws.id,
+        "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v if v is not None else "")}}
+                              for v in row]} for row in rows],
+        "fields": "userEnteredValue",
+    }}]})
+
+
 def save_raw_answers(sid, student, selected_day, order, bank, responses):
     """Persist and verify A:I before any AI call; never overwrite existing raw answers."""
     ws = sheet("Câu trả lời")
@@ -394,11 +407,7 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
             rows.append([sid, student, str(selected_day), item["id"],
                          q.get("Ngày nội dung", ""), q.get("Module", ""),
                          level(q), q.get("Câu hỏi", ""), responses[item["id"]]])
-        # Anchor table discovery to A:I. With no table_range, Sheets can
-        # discover another logical table and append outside the raw columns.
-        # Never blindly retry an append: a timeout can mean it was committed.
-        # The next attempt re-reads persisted IDs before appending missing rows.
-        ws.append_rows(rows, value_input_option="RAW", table_range="A1:I1")
+        append_data_rows(ws, rows)
     # Read-after-write verification, including every original answer.
     check = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
     found = {}
@@ -434,7 +443,7 @@ def queue_submission(sid, student, selected_day, order):
         raise RuntimeError("Trạng thái bài kiểm tra chưa hợp lệ.")
     data = [sid, student, selected_day, "Chờ chấm", timestamp(), timestamp(),
             json.dumps(order, ensure_ascii=False), 13, len(order)-13, "", 32, timestamp()]
-    retry_sheets(lambda: ws.append_row(data, value_input_option="RAW"))
+    append_data_rows(ws, [data])
     confirmed = retry_sheets(lambda: ws.get_all_values())
     if sum(1 for row in confirmed[1:] if row and row[0] == sid and len(row) > 3
            and row[3] == "Chờ chấm") != 1:
@@ -453,7 +462,10 @@ def grade_pending_session(assignment, bank, students):
     ids = [item["id"] for item in order]
     if not ids or len(ids) != len(set(ids)) or len(matched) != len(ids):
         raise RuntimeError("Số câu trả lời gốc không khớp với bộ đề.")
-    responses = {norm(r.get("Question ID")): norm(r.get("Nội dung trả lời học viên")) for r in matched}
+    if any(norm(r.get("Họ và tên")) != student or norm(r.get("Ngày đánh giá")) != str(selected_day)
+           for r in matched):
+        raise RuntimeError("Câu trả lời không thuộc đúng học viên/ngày của bài kiểm tra.")
+    responses = {norm(r.get("Question ID")): str(r.get("Nội dung trả lời học viên") or "") for r in matched}
     if set(responses) != set(ids) or any(not responses[qid] for qid in ids):
         raise RuntimeError("Thiếu hoặc trùng Question ID / câu trả lời.")
     results = grade_submission(student, selected_day, order, bank, responses, sid)
@@ -530,9 +542,12 @@ def learning_journey(results):
 def commit_results(sid, student, selected_day, order, results, students):
     # A:I was persisted before grading. Update J:S in the SAME rows.
     ws = sheet("Câu trả lời")
-    existing = retry_sheets(lambda: ws.get_all_values())
+    existing = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
     headers = existing[0] if existing else []
     expected_ids = {item["id"] for item in order}
+    result_ids = [r["Question ID"] for r in results]
+    if len(result_ids) != len(expected_ids) or set(result_ids) != expected_ids:
+        raise RuntimeError("Bộ kết quả thiếu hoặc trùng Question ID; không ghi điểm.")
     indexed = {}
     for idx, row in enumerate(existing[1:], 2):
         if row and row[0] == sid and len(row) > 3:
@@ -546,7 +561,8 @@ def commit_results(sid, student, selected_day, order, results, students):
     for result in results:
         qid = result["Question ID"]
         idx, original = indexed[qid][0]
-        if len(original) < 9 or original[8] != result["Nội dung trả lời học viên"]:
+        if (len(original) < 9 or original[8] != result["Nội dung trả lời học viên"]
+                or norm(original[1]) != student or norm(original[2]) != str(selected_day)):
             raise RuntimeError(f"Câu trả lời gốc {qid} không khớp; dừng chấm.")
         # Keep existing J:S column layout and Trainer review state on retries.
         graded = [result.get(h, "") for h in headers[9:]]
@@ -556,24 +572,22 @@ def commit_results(sid, student, selected_day, order, results, students):
                         "values": [graded]})
     if updates:
         retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
-    verified = retry_sheets(lambda: ws.get_all_values())
+    verified = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
     for qid, entries in indexed.items():
         idx = entries[0][0]
         row = verified[idx-1]
-        if len(row) < 14 or not norm(row[11]) or not norm(row[12]):
+        if row[:9] != entries[0][1][:9]:
+            raise RuntimeError(f"Dữ liệu gốc của câu {qid} đã thay đổi; dừng hoàn tất bài.")
+        if len(row) < 14 or row[11] in ("", None) or row[12] in ("", None):
             raise RuntimeError(f"Chưa xác minh điểm của câu {qid}.")
+    for update in updates:
+        idx = int(re.search(r"\d+", update["range"]).group())
+        actual = verified[idx-1][9:len(headers)]
+        actual += [""] * (len(headers)-9-len(actual))
+        if actual != update["values"][0]:
+            raise RuntimeError("Kết quả đọc lại không khớp dữ liệu chấm; chưa hoàn tất bài.")
     records.clear()
     fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
-    aws = sheet("Bài kiểm tra")
-    assignment_rows = retry_sheets(lambda: aws.get_all_values())
-    idx = next((i for i, row in enumerate(assignment_rows[1:], 2) if row and row[0] == sid), None)
-    if idx is None:
-        # Single append of assignment metadata after grading.
-        retry_sheets(lambda: aws.append_row([sid, student, selected_day, "Hoàn thành", timestamp(), timestamp(), json.dumps(order, ensure_ascii=False), 13, len(order)-13, fresh_score, 32, timestamp()], value_input_option="RAW"))
-    else:
-        cols = {name: i+1 for i, name in enumerate(ASSIGN_HEADERS)}
-        updates = [{"range": gspread.utils.rowcol_to_a1(idx, cols[k]), "values": [[v]]} for k, v in {"Trạng thái":"Hoàn thành", "Kết thúc":timestamp(), "Điểm mới":fresh_score, "Cập nhật lúc":timestamp()}.items()]
-        retry_sheets(lambda: aws.batch_update(updates, value_input_option="RAW"))
     sws = sheet("Lượt đánh giá")
     summary = retry_sheets(lambda: sws.get_all_values())
     if not any(row and row[0] == sid for row in summary[1:]):
@@ -597,7 +611,21 @@ def commit_results(sid, student, selected_day, order, results, students):
                   "Tỷ lệ (%)": round(fresh_score / 32 * 100, 2),
                   "Trạng thái": "Completed", "Hành trình học tập": journey,
                   "Nội dung cần ôn tập cho ngày tiếp theo": plan, **by_level}
-        retry_sheets(lambda: sws.append_row([values.get(h, "") for h in summary_headers], value_input_option="RAW"))
+        append_data_rows(sws, [[values.get(h, "") for h in summary_headers]])
+    confirmed_summary = retry_sheets(lambda: sws.get_all_values())
+    if sum(1 for row in confirmed_summary[1:] if row and row[0] == sid) != 1:
+        raise RuntimeError("Chưa xác minh lưu duy nhất báo cáo tổng hợp.")
+    aws = sheet("Bài kiểm tra")
+    assignment_rows = retry_sheets(lambda: aws.get_all_values())
+    idx = next((i for i, row in enumerate(assignment_rows[1:], 2) if row and row[0] == sid), None)
+    if idx is None:
+        # Single append of assignment metadata after grading.
+        append_data_rows(aws, [[sid, student, selected_day, "Hoàn thành", timestamp(), timestamp(), json.dumps(order, ensure_ascii=False), 13, len(order)-13, fresh_score, 32, timestamp()]])
+    else:
+        cols = {name: i+1 for i, name in enumerate(ASSIGN_HEADERS)}
+        updates = [{"range": gspread.utils.rowcol_to_a1(idx, cols[k]), "values": [[v]]} for k, v in {"Trạng thái":"Hoàn thành", "Kết thúc":timestamp(), "Điểm mới":fresh_score, "Cập nhật lúc":timestamp()}.items()]
+        retry_sheets(lambda: aws.batch_update(updates, value_input_option="RAW"))
+    records.clear()
     return fresh_score
 
 
