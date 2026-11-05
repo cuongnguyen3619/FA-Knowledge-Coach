@@ -852,6 +852,26 @@ def show_student_report(student, selected_day, history):
                 st.caption("Cần ôn: " + norm(r.get("Kiến thức cần ôn tập")))
 
 
+def set_exam_open(selected_day, is_open):
+    """Persist the Trainer-controlled exam switch in column E of Khóa học."""
+    ws = sheet("Khóa học")
+    values = retry_sheets(lambda: ws.get_all_values())
+    if not values:
+        raise RuntimeError("Tab Khóa học trống.")
+    if len(values[0]) < 5 or norm(values[0][4]) != "Trạng thái bài kiểm tra":
+        retry_sheets(lambda: ws.update("E1", [["Trạng thái bài kiểm tra"]]))
+    matches = []
+    for idx, row in enumerate(values[1:], 2):
+        match = re.search(r"(\\d+)", norm(row[0])) if row else None
+        if match and int(match.group(1)) == selected_day:
+            matches.append(idx)
+    if len(matches) != 1:
+        raise RuntimeError("Không xác định duy nhất ngày đào tạo trong Khóa học.")
+    retry_sheets(lambda: ws.update(f"E{matches[0]}", [["Mở" if is_open else "Đóng"]]))
+    cached_course_values.clear()
+    records.clear()
+
+
 def course_window():
     now = datetime.now(TZ)
     schedule = []
@@ -868,10 +888,10 @@ def course_window():
         closes = datetime.combine(date_part, end, tzinfo=TZ)
         if closes <= opens:
             raise ValueError("Giờ đóng bài phải sau giờ mở bài")
-        schedule.append((int(match.group(1)), opens, closes))
+        schedule.append((int(match.group(1)), opens, closes, norm(row[4]) if len(row) > 4 else "Đóng"))
     if not schedule:
         raise ValueError("Không tìm thấy lịch hợp lệ trong tab Khóa học")
-    active = next((item for item in schedule if item[1] <= now < item[2]), None)
+    active = next((item for item in schedule if item[3] == "Mở"), None)
     return now, active, sorted(schedule, key=lambda item: item[1])
 
 
@@ -881,7 +901,7 @@ with st.sidebar:
         password = st.secrets.get("TRAINER_PASSWORD")
         if not password or st.text_input("Mật khẩu Trainer", type="password") != password:
             st.stop()
-        mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Chấm sau 17h", "Trainer – Test học viên", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
+        mode = st.radio("Chức năng", ["Trainer – Dashboard", "Trainer – Điều khiển bài kiểm tra", "Trainer – Chấm bài", "Trainer – Test học viên", "Trainer – Xem trước", "Trainer – Cảnh báo", "Trainer – Duyệt & gửi tất cả"])
     else:
         mode = "Làm bài kiểm tra"
     if role == "Trainer":
@@ -1112,8 +1132,30 @@ if mode.startswith("Trainer"):
                 del st.session_state[test_key]
                 st.rerun()
         st.stop()
-    if mode == "Trainer – Chấm sau 17h":
-        st.subheader("Chấm bài đã nộp sau 17:00")
+    if mode == "Trainer – Điều khiển bài kiểm tra":
+        st.subheader(f"Điều khiển bài kiểm tra – Ngày {selected_day}")
+        schedule_rows = cached_course_values()
+        current = next((row for row in schedule_rows[1:] if row and
+                        re.search(r"(\\d+)", norm(row[0])) and
+                        int(re.search(r"(\\d+)", norm(row[0])).group(1)) == selected_day), None)
+        status = norm(current[4]) if current and len(current) > 4 else "Đóng"
+        st.write(f"Trạng thái hiện tại: **{status}**")
+        if status == "Mở":
+            if st.button("Đóng bài kiểm tra", type="primary"):
+                set_exam_open(selected_day, False)
+                st.rerun()
+        else:
+            if st.button("Mở bài kiểm tra", type="primary"):
+                other_open = [row for row in schedule_rows[1:] if len(row) > 4 and norm(row[4]) == "Mở"]
+                if other_open:
+                    st.error("Hãy đóng bài kiểm tra đang mở trước khi mở ngày khác.")
+                else:
+                    set_exam_open(selected_day, True)
+                    st.rerun()
+        st.caption("Trạng thái được lưu trong cột E của tab Khóa học. Không phụ thuộc giờ cố định.")
+        st.stop()
+    if mode == "Trainer – Chấm bài":
+        st.subheader("Chấm bài đã nộp")
         st.caption("Trainer chỉ bấm một lần. Hệ thống lần lượt chấm, lưu từng bài và tự chuyển sang bài tiếp theo.")
         batch_key = f"grading_batch:{selected_day}"
         batch = st.session_state.get(batch_key)
@@ -1122,9 +1164,7 @@ if mode.startswith("Trainer"):
                        if norm(r.get("Trạng thái")) == "Chờ chấm"
                        and norm(r.get("Ngày")) == str(selected_day)]
             st.metric("Bài chờ chấm", len(pending))
-            if datetime.now(TZ).hour < 17:
-                st.warning("Chỉ cho phép chấm từ 17:00 (giờ Việt Nam).")
-            elif pending and st.button("Chấm tất cả bài đang chờ", type="primary"):
+            if pending and st.button("Chấm tất cả bài đang chờ", type="primary"):
                 st.session_state[batch_key] = {
                     "queue": pending, "index": 0, "successes": [], "failures": []
                 }
@@ -1310,10 +1350,7 @@ if mode.startswith("Trainer"):
     st.stop()
 
 if role == "Học viên" and active_window is None:
-    st.info("Bài kiểm tra chưa mở hoặc đã hết giờ.")
-    upcoming = next((item for item in course_schedule if item[1] > now), None)
-    if upcoming:
-        st.caption(f"Lượt tiếp theo: Ngày {upcoming[0]} · {upcoming[1]:%d/%m/%Y} · {upcoming[1]:%H:%M}–{upcoming[2]:%H:%M}")
+    st.info("Bài kiểm tra hiện đang đóng. Vui lòng chờ Trainer mở bài.")
     st.stop()
 
 st.subheader(f"Bài đánh giá – Ngày {selected_day}")
@@ -1368,8 +1405,10 @@ if exam["status"] == "taking":
                 responses[item["id"]] = st.text_area("Câu trả lời", key=f"{key}:{item['id']}", height=120)
         submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
     if submitted:
-        if datetime.now(TZ) >= active_window[2]:
-            st.error("Đã hết giờ làm bài. Vui lòng liên hệ Giảng viên.")
+        cached_course_values.clear()
+        _, current_window, _ = course_window()
+        if current_window is None or current_window[0] != selected_day:
+            st.error("Trainer đã đóng bài kiểm tra. Không thể nộp bài mới.")
             st.stop()
         if any(not responses.get(item["id"], "").strip() for item in order):
             st.warning("Bạn còn câu chưa trả lời. Vui lòng hoàn thành trước khi nộp.")
