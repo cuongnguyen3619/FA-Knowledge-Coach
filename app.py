@@ -1443,10 +1443,20 @@ if exam["status"] == "taking":
                 responses[item["id"]] = st.text_area("Câu trả lời", key=f"{key}:{item['id']}", height=120)
         submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
     if submitted:
-        cached_course_values.clear()
-        _, current_window, _ = course_window()
-        if current_window is None or current_window[0] != selected_day:
-            st.error("Trainer đã đóng bài kiểm tra. Không thể nộp bài mới.")
+        try:
+            # Re-read only the Trainer's open/close switch; historical date/time
+            # formatting must not block a submission.
+            current_rows = retry_sheets(lambda: sheet("Khóa học").get_all_values())
+            open_days = []
+            for course_row in current_rows[1:]:
+                day_match = re.search(r"(\d+)", norm(course_row[0])) if course_row else None
+                if day_match and len(course_row) > 4 and norm(course_row[4]).casefold() == "mở":
+                    open_days.append(int(day_match.group(1)))
+            if selected_day not in open_days:
+                st.error("Bài kiểm tra đã đóng. Vui lòng liên hệ Trainer trước khi nộp.")
+                st.stop()
+        except Exception as exc:
+            st.error(f"Không xác minh được trạng thái mở bài kiểm tra: {exc}")
             st.stop()
         if any(not responses.get(item["id"], "").strip() for item in order):
             st.warning("Bạn còn câu chưa trả lời. Vui lòng hoàn thành trước khi nộp.")
