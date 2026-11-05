@@ -862,7 +862,7 @@ def set_exam_open(selected_day, is_open):
         retry_sheets(lambda: ws.update("E1", [["Trạng thái bài kiểm tra"]]))
     matches = []
     for idx, row in enumerate(values[1:], 2):
-        match = re.search(r"(\\d+)", norm(row[0])) if row else None
+        match = re.search(r"(\d+)", norm(row[0])) if row else None
         if match and int(match.group(1)) == selected_day:
             matches.append(idx)
     if len(matches) != 1:
@@ -1189,7 +1189,6 @@ if mode.startswith("Trainer"):
                     st.error("Hãy đóng bài kiểm tra đang mở trước khi mở ngày khác.")
                 else:
                     set_exam_open(selected_day, True)
-                    st.session_state[f"confirm_open_day_{selected_day}"] = False
                     st.rerun()
         st.caption("Agent chỉ đề xuất ngày; Trainer xác nhận và quyết định thời điểm mở/đóng. Không tự chấm hoặc gửi báo cáo.")
         st.stop()
