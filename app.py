@@ -895,6 +895,38 @@ def course_window():
     return now, active, sorted(schedule, key=lambda item: item[1])
 
 
+def suggested_training_day():
+    """Suggest the course day from the date column, without opening an exam."""
+    today = datetime.now(TZ).date()
+    try:
+        rows = cached_course_values()[1:]
+        dated = []
+        for row in rows:
+            if len(row) < 2:
+                continue
+            match = re.search(r"(\d+)", norm(row[0]))
+            if not match:
+                continue
+            try:
+                d = datetime.strptime(norm(row[1]), "%d-%b").replace(year=today.year).date()
+            except ValueError:
+                continue
+            day_number = int(match.group(1))
+            if 1 <= day_number <= 4:
+                dated.append((day_number, d))
+        today_matches = [day_number for day_number, d in dated if d == today]
+        if today_matches:
+            return today_matches[0]
+        previous = [(d, day_number) for day_number, d in dated if d < today]
+        if previous:
+            return max(previous)[1]
+        if dated:
+            return min((d, day_number) for day_number, d in dated)[1]
+    except Exception:
+        pass
+    return 1
+
+
 with st.sidebar:
     role = st.radio("Giao diện", ["Học viên", "Trainer"], key="fa_role")
     if role == "Trainer":
@@ -905,7 +937,7 @@ with st.sidebar:
     else:
         mode = "Làm bài kiểm tra"
     if role == "Trainer":
-        selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], format_func=lambda d: f"Ngày {d}")
+        selected_day = st.selectbox("Ngày đào tạo", [1, 2, 3, 4], index=suggested_training_day()-1, format_func=lambda d: f"Ngày {d}")
         st.caption("13 câu mới/ngày · 32 điểm; câu ôn tập không cộng điểm")
     else:
         try:
@@ -1133,26 +1165,33 @@ if mode.startswith("Trainer"):
                 st.rerun()
         st.stop()
     if mode == "Trainer – Điều khiển bài kiểm tra":
-        st.subheader(f"Điều khiển bài kiểm tra – Ngày {selected_day}")
+        st.subheader("Điều khiển bài kiểm tra")
+        recommended = suggested_training_day()
+        st.info(f"Agent đề xuất: **Ngày {recommended}** dựa trên lịch trong tab Khóa học và ngày hiện tại.")
+        st.caption("Trainer có thể chọn ngày khác tại mục Ngày đào tạo ở thanh bên.")
         schedule_rows = cached_course_values()
         current = next((row for row in schedule_rows[1:] if row and
-                        re.search(r"(\\d+)", norm(row[0])) and
-                        int(re.search(r"(\\d+)", norm(row[0])).group(1)) == selected_day), None)
+                        re.search(r"(\d+)", norm(row[0])) and
+                        int(re.search(r"(\d+)", norm(row[0])).group(1)) == selected_day), None)
         status = norm(current[4]) if current and len(current) > 4 else "Đóng"
-        st.write(f"Trạng thái hiện tại: **{status}**")
+        st.write(f"Ngày đã chọn: **Ngày {selected_day}** · Trạng thái: **{status}**")
         if status == "Mở":
             if st.button("Đóng bài kiểm tra", type="primary"):
                 set_exam_open(selected_day, False)
                 st.rerun()
         else:
-            if st.button("Mở bài kiểm tra", type="primary"):
+            confirmed = st.checkbox(f"Tôi xác nhận mở bài kiểm tra Ngày {selected_day}",
+                                    key=f"confirm_open_day_{selected_day}")
+            if st.button(f"Mở bài kiểm tra Ngày {selected_day}", type="primary",
+                         disabled=not confirmed):
                 other_open = [row for row in schedule_rows[1:] if len(row) > 4 and norm(row[4]) == "Mở"]
                 if other_open:
                     st.error("Hãy đóng bài kiểm tra đang mở trước khi mở ngày khác.")
                 else:
                     set_exam_open(selected_day, True)
+                    st.session_state[f"confirm_open_day_{selected_day}"] = False
                     st.rerun()
-        st.caption("Trạng thái được lưu trong cột E của tab Khóa học. Không phụ thuộc giờ cố định.")
+        st.caption("Agent chỉ đề xuất ngày; Trainer xác nhận và quyết định thời điểm mở/đóng. Không tự chấm hoặc gửi báo cáo.")
         st.stop()
     if mode == "Trainer – Chấm bài":
         st.subheader("Chấm bài đã nộp")
