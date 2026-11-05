@@ -468,6 +468,24 @@ def grade_pending_session(assignment, bank, students):
     responses = {norm(r.get("Question ID")): str(r.get("Nội dung trả lời học viên") or "") for r in matched}
     if set(responses) != set(ids) or any(not responses[qid] for qid in ids):
         raise RuntimeError("Thiếu hoặc trùng Question ID / câu trả lời.")
+    # Resume a fully persisted grading result after a verification/summary error.
+    # Do not call the Agent again or change already saved scores on a retry.
+    saved = {norm(r.get("Question ID")): r for r in matched}
+    if all(r.get("Điểm đạt") not in ("", None)
+           and r.get("Điểm tối đa") not in ("", None)
+           and norm(r.get("Trạng thái kiểm duyệt"))
+           and norm(r.get("Câu hỏi")) == norm(bank.get(qid, {}).get("Câu hỏi"))
+           and norm(r.get("Đáp án chuẩn đã duyệt")) == norm(
+               bank.get(qid, {}).get("Đáp án tham khảo") or bank.get(qid, {}).get("Đáp án đề gốc"))
+           for qid, r in saved.items()):
+        results = []
+        for item in order:
+            result = dict(saved[item["id"]])
+            result["Điểm đạt"] = report_number(result["Điểm đạt"])
+            result["Điểm tối đa"] = report_number(result["Điểm tối đa"])
+            result["review"] = item.get("review", False)
+            results.append(result)
+        return commit_results(sid, student, selected_day, order, results, students)
     results = grade_submission(student, selected_day, order, bank, responses, sid)
     return commit_results(sid, student, selected_day, order, results, students)
 
@@ -565,7 +583,7 @@ def commit_results(sid, student, selected_day, order, results, students):
                 or norm(original[1]) != student or norm(original[2]) != str(selected_day)):
             raise RuntimeError(f"Câu trả lời gốc {qid} không khớp; dừng chấm.")
         # Keep existing J:S column layout and Trainer review state on retries.
-        graded = [result.get(h, "") for h in headers[9:]]
+        graded = [result.get(h) if result.get(h) is not None else "" for h in headers[9:]]
         if len(original) > 17 and norm(original[17]).casefold() == "trainer approved":
             continue
         updates.append({"range": f"J{idx}:{gspread.utils.rowcol_to_a1(idx, len(headers))}",
@@ -582,7 +600,7 @@ def commit_results(sid, student, selected_day, order, results, students):
             raise RuntimeError(f"Chưa xác minh điểm của câu {qid}.")
     for update in updates:
         idx = int(re.search(r"\d+", update["range"]).group())
-        actual = verified[idx-1][9:len(headers)]
+        actual = [v if v is not None else "" for v in verified[idx-1][9:len(headers)]]
         actual += [""] * (len(headers)-9-len(actual))
         if actual != update["values"][0]:
             raise RuntimeError("Kết quả đọc lại không khớp dữ liệu chấm; chưa hoàn tất bài.")
