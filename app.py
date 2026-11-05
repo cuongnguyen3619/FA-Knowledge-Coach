@@ -887,26 +887,18 @@ def set_exam_open(selected_day, is_open):
 
 
 def course_window():
+    """Only the Trainer's switch controls availability; dates/times are advisory."""
     now = datetime.now(TZ)
     schedule = []
     for row in cached_course_values()[1:]:
-        if len(row) < 4:
+        if not row:
             continue
         match = re.search(r"(\d+)", norm(row[0]))
         if not match:
             continue
-        date_part = datetime.strptime(norm(row[1]), "%d-%b").replace(year=now.year).date()
-        start = datetime.strptime(norm(row[2]), "%I:%M %p").time()
-        end = datetime.strptime(norm(row[3]), "%I:%M %p").time()
-        opens = datetime.combine(date_part, start, tzinfo=TZ)
-        closes = datetime.combine(date_part, end, tzinfo=TZ)
-        if closes <= opens:
-            raise ValueError("Giờ đóng bài phải sau giờ mở bài")
-        schedule.append((int(match.group(1)), opens, closes, norm(row[4]) if len(row) > 4 else "Đóng"))
-    if not schedule:
-        raise ValueError("Không tìm thấy lịch hợp lệ trong tab Khóa học")
-    active = next((item for item in schedule if item[3] == "Mở"), None)
-    return now, active, sorted(schedule, key=lambda item: item[1])
+        schedule.append((int(match.group(1)), None, None, norm(row[4]) if len(row) > 4 else "Đóng"))
+    active = next((item for item in schedule if item[3].casefold() == "mở"), None)
+    return now, active, sorted(schedule, key=lambda item: item[0])
 
 
 def suggested_training_day():
@@ -1208,7 +1200,7 @@ if mode.startswith("Trainer"):
         st.stop()
     if mode == "Trainer – Chấm bài":
         st.subheader("Chấm bài đã nộp")
-        st.caption("Trainer chỉ bấm một lần. Hệ thống lần lượt chấm, lưu từng bài và tự chuyển sang bài tiếp theo.")
+        st.caption("Trainer chủ động bấm chấm vào bất kỳ thời điểm nào. Hệ thống lần lượt chấm và lưu từng bài; không tự chạy theo giờ.")
         batch_key = f"grading_batch:{selected_day}"
         batch = st.session_state.get(batch_key)
         if batch is None:
@@ -1495,7 +1487,7 @@ if exam["status"] == "raw_saving":
     st.stop()
 
 if exam["status"] == "queued":
-    st.success("Đã lưu đầy đủ câu trả lời. Hệ thống sẽ chấm sau 17:00 khi Trainer chạy chấm theo lô.")
+    st.success("Đã lưu đầy đủ câu trả lời. Bài đang chờ Trainer chủ động chấm và công bố kết quả.")
     st.stop()
 
 if exam["status"] == "grading":
