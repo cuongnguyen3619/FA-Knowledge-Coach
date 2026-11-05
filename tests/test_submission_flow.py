@@ -1,7 +1,7 @@
 import ast, copy, json, re, types, unittest
 from pathlib import Path
 source=(Path(__file__).resolve().parents[1] / 'app.py').read_text();tree=ast.parse(source)
-names={'append_data_rows','save_raw_answers','queue_submission','grade_pending_session','grade_submission','commit_results','learning_journey','norm','level'}
+names={'append_data_rows','save_raw_answers','queue_submission','grade_pending_session','grade_submission','commit_results','learning_journey','norm','level','report_number'}
 body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
 def a1(row,col):
  s=''
@@ -23,7 +23,7 @@ class WS:
   for u in updates:
    m=re.match(r'([A-Z]+)(\d+)',u['range']);col=0
    for c in m[1]:col=26*col+ord(c)-64
-   row=self.rows[int(m[2])-1];vals=u['values'][0];row.extend(['']*max(0,col-1+len(vals)-len(row)));row[col-1:col-1+len(vals)]=vals
+   row=self.rows[int(m[2])-1];vals=[v if v is not None else '' for v in u['values'][0]];row.extend(['']*max(0,col-1+len(vals)-len(row)));row[col-1:col-1+len(vals)]=vals
 class Records:
  def clear(self):pass
 class TestFlow(unittest.TestCase):
@@ -48,7 +48,7 @@ class TestFlow(unittest.TestCase):
  def test_summary_timeout_keeps_pending(self):
   self.save();self.book.fail='Lượt đánh giá'
   with self.assertRaises(TimeoutError):self.grade()
-  self.assertEqual(self.assign.rows[1][3],'Chờ chấm');self.grade();self.assertEqual(len(self.summary.rows),2);self.assertEqual(self.assign.rows[1][3],'Hoàn thành')
+  self.assertEqual(self.assign.rows[1][3],'Chờ chấm');calls=list(self.calls);self.grade();self.assertEqual(self.calls,calls);self.assertEqual(len(self.summary.rows),2);self.assertEqual(self.assign.rows[1][3],'Hoàn thành')
  def test_agent_failure_keeps_raw(self):
   self.save();before=copy.deepcopy(self.raw.rows)
   def fail(*args):raise RuntimeError('AI unavailable')
