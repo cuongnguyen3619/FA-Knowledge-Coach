@@ -364,7 +364,8 @@ def cached_course_values():
 def save_raw_answers(sid, student, selected_day, order, bank, responses):
     """Persist and verify A:I before any AI call; never overwrite existing raw answers."""
     ws = sheet("Câu trả lời")
-    values = retry_sheets(lambda: ws.get_all_values())
+    # Read stored text, not locale-dependent display formatting.
+    values = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
     headers = values[0] if values else []
     expected = ["Session ID", "Họ và tên", "Ngày đánh giá", "Question ID",
                 "Ngày khóa học", "Module", "Level", "Câu hỏi", "Nội dung trả lời học viên"]
@@ -393,16 +394,29 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
             rows.append([sid, student, str(selected_day), item["id"],
                          q.get("Ngày nội dung", ""), q.get("Module", ""),
                          level(q), q.get("Câu hỏi", ""), responses[item["id"]]])
-        retry_sheets(lambda: ws.append_rows(rows, value_input_option="RAW"))
+        # Anchor table discovery to A:I. With no table_range, Sheets can
+        # discover another logical table and append outside the raw columns.
+        # Never blindly retry an append: a timeout can mean it was committed.
+        # The next attempt re-reads persisted IDs before appending missing rows.
+        ws.append_rows(rows, value_input_option="RAW", table_range="A1:I1")
     # Read-after-write verification, including every original answer.
-    check = retry_sheets(lambda: ws.get_all_values())
+    check = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
     found = {}
     for row in check[1:]:
         if row and row[0] == sid and len(row) > 3:
             found.setdefault(row[3], []).append(row)
     if set(found) != set(ids) or any(len(found[qid]) != 1 or
        len(found[qid][0]) < 9 or found[qid][0][8] != responses[qid] for qid in ids):
-        raise RuntimeError("Chưa xác nhận lưu đủ câu trả lời; có thể thử đồng bộ lại.")
+        missing_ids = [qid for qid in ids if qid not in found]
+        duplicate_ids = [qid for qid in ids if len(found.get(qid, [])) > 1]
+        changed_ids = [qid for qid in ids if len(found.get(qid, [])) == 1 and
+                       (len(found[qid][0]) < 9 or found[qid][0][8] != responses[qid])]
+        raise RuntimeError(
+            f"Chưa xác nhận lưu đủ câu trả lời ({len(found)}/{len(ids)} câu). "
+            f"Thiếu: {', '.join(missing_ids) or 'không'}; "
+            f"trùng: {', '.join(duplicate_ids) or 'không'}; "
+            f"khác nội dung: {', '.join(changed_ids) or 'không'}. "
+            "Có thể thử đồng bộ lại.")
     records.clear()
     return True
 
@@ -1520,4 +1534,5 @@ else:
     if st.button("Thử đồng bộ lại kết quả", type="primary"):
         exam["status"] = "saving"
         st.rerun()
+
 
