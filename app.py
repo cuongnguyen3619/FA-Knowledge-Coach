@@ -7,6 +7,8 @@ import random
 import re
 import uuid
 import time
+import threading
+from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -71,18 +73,94 @@ def approved(row):
     # Levels 2–4 require Trainer approval.
     return level(row) == 1 or norm(row.get("Trạng thái duyệt")).casefold() in APPROVED
 
+class SheetsRequestBudget:
+    """One rolling-window budget shared by all sessions in this app process."""
+    def __init__(self, clock=None, sleeper=None, limit=48, window=60.5):
+        self.clock = clock or time.monotonic
+        self.sleeper = sleeper or time.sleep
+        self.limit, self.window = limit, window
+        self.events = {"read": deque(), "write": deque()}
+        self.cooldown = {"read": 0.0, "write": 0.0}
+        self.lock = threading.Lock()
+
+    def acquire(self, kind):
+        while True:
+            with self.lock:
+                now = self.clock()
+                events = self.events[kind]
+                while events and events[0] <= now - self.window:
+                    events.popleft()
+                wait = max(0.0, self.cooldown[kind] - now)
+                if len(events) >= self.limit:
+                    wait = max(wait, events[0] + self.window - now)
+                if wait <= 0:
+                    events.append(now)
+                    return
+            self.sleeper(min(wait + .01, 1.0))
+
+    def exhausted(self, kind):
+        with self.lock:
+            self.cooldown[kind] = max(self.cooldown[kind], self.clock() + 61.0)
+
+
+@st.cache_resource(show_spinner=False)
+def sheets_budget():
+    return SheetsRequestBudget()
+
+
+class BudgetedSheetsHTTPClient(gspread.HTTPClient):
+    def request(self, method, endpoint, *args, **kwargs):
+        # Covers metadata, reads, writes and calls not wrapped in retry_sheets.
+        kind = "read" if str(method).lower() in ("get", "head") else "write"
+        for attempt in range(3):
+            sheets_budget().acquire(kind)
+            try:
+                return super().request(method, endpoint, *args, **kwargs)
+            except gspread.exceptions.APIError as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status != 429:
+                    raise
+                sheets_budget().exhausted(kind)
+                if attempt == 2:
+                    raise
+                # Only an explicit rejected quota request is retried here.
+                # Never retry uncertain append/network failures at transport level.
+
+
 @st.cache_resource(show_spinner=False)
 def book():
     creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return gspread.authorize(creds).open_by_key(SHEET_ID)
+    client = gspread.authorize(creds, http_client=BudgetedSheetsHTTPClient)
+    client.set_timeout((10, 45))
+    return client.open_by_key(SHEET_ID)
+
+
+@st.cache_resource(ttl=300, show_spinner=False)
+def worksheet_index():
+    return {ws.title: ws for ws in book().worksheets()}
+
 
 def sheet(name):
-    return book().worksheet(name)
+    try:
+        return worksheet_index()[name]
+    except KeyError:
+        worksheet_index.clear()
+        try:
+            return worksheet_index()[name]
+        except KeyError:
+            raise gspread.WorksheetNotFound(name)
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def records(name):
-    # Shared cache prevents a Google Sheets read on every Streamlit rerun.
     return sheet(name).get_all_records(default_blank="", numericise_ignore=["all"])
+
+
+def invalidate_records(*names):
+    # Keep static roster/bank caches warm when a learner saves or Trainer grades.
+    for name in names or ("Câu trả lời", "Bài kiểm tra", "Lượt đánh giá"):
+        records.clear(name)
+
 
 def ensure_tab(name, headers):
     try:
@@ -90,7 +168,9 @@ def ensure_tab(name, headers):
     except gspread.WorksheetNotFound:
         ws = book().add_worksheet(title=name, rows=2000, cols=max(20, len(headers)))
         ws.append_row(headers, value_input_option="RAW")
+        worksheet_index()[name] = ws
         return ws
+
 
 def question_bank():
     result = {}
@@ -194,8 +274,9 @@ def update_assignment(sid, **values):
     cells = ws.get_all_values()
     for index, row in enumerate(cells[1:], 2):
         if row and row[0] == sid:
-            for key, value in values.items():
-                ws.update_cell(index, ASSIGN_HEADERS.index(key)+1, value)
+            updates = [{"range": gspread.utils.rowcol_to_a1(index, ASSIGN_HEADERS.index(key)+1), "values": [[value]]}
+                       for key, value in values.items()]
+            retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
             return
     raise RuntimeError("Không tìm thấy bài kiểm tra để cập nhật")
 
@@ -378,7 +459,7 @@ def retry_sheets(action, attempts=5):
             return action()
         except gspread.exceptions.APIError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status not in (429, 500, 502, 503, 504) or i == attempts - 1:
+            if status not in (500, 502, 503, 504) or i == attempts - 1:
                 raise
             time.sleep(min(2 ** i + random.random(), 16))
 
@@ -459,7 +540,7 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
             f"trùng: {', '.join(duplicate_ids) or 'không'}; "
             f"khác nội dung: {', '.join(changed_ids) or 'không'}. "
             "Có thể thử đồng bộ lại.")
-    records.clear()
+    invalidate_records()
     return True
 
 def queue_submission(sid, student, selected_day, order):
@@ -481,7 +562,7 @@ def queue_submission(sid, student, selected_day, order):
     if sum(1 for row in confirmed[1:] if row and row[0] == sid and len(row) > 3
            and row[3] == "Chờ chấm") != 1:
         raise RuntimeError("Chưa xác nhận trạng thái Chờ chấm.")
-    records.clear()
+    invalidate_records()
 
 
 def grade_pending_session(assignment, bank, students):
@@ -643,7 +724,7 @@ def commit_results(sid, student, selected_day, order, results, students):
         actual += [""] * (len(headers)-9-len(actual))
         if actual != update["values"][0]:
             raise RuntimeError("Kết quả đọc lại không khớp dữ liệu chấm; chưa hoàn tất bài.")
-    records.clear()
+    invalidate_records()
     fresh_score = sum(float(r["Điểm đạt"]) for r in results if not r["review"])
     sws = sheet("Lượt đánh giá")
     summary = retry_sheets(lambda: sws.get_all_values())
@@ -694,7 +775,7 @@ def commit_results(sid, student, selected_day, order, results, students):
         cols = {name: i+1 for i, name in enumerate(ASSIGN_HEADERS)}
         updates = [{"range": gspread.utils.rowcol_to_a1(idx, cols[k]), "values": [[v]]} for k, v in {"Trạng thái":"Hoàn thành", "Kết thúc":timestamp(), "Điểm mới":fresh_score, "Cập nhật lúc":timestamp()}.items()]
         retry_sheets(lambda: aws.batch_update(updates, value_input_option="RAW"))
-    records.clear()
+    invalidate_records()
     return fresh_score
 
 
@@ -824,7 +905,7 @@ def classify_session(assignment, bank):
         if updates:
             retry_sheets(lambda: sws.batch_update(updates, value_input_option="RAW"))
     update_assignment(sid, **{"Trạng thái": "Đã phân loại", "Điểm mới": "", "Cập nhật lúc": timestamp()})
-    records.clear()
+    invalidate_records()
 
 
 def reviewed_adjustment(answer, decisions):
@@ -1189,7 +1270,7 @@ def set_exam_open(selected_day, is_open):
         raise RuntimeError("Không xác định duy nhất ngày đào tạo trong Khóa học.")
     retry_sheets(lambda: ws.update(f"E{matches[0]}", [["Mở" if is_open else "Đóng"]]))
     cached_course_values.clear()
-    records.clear()
+    invalidate_records()
 
 
 def course_window():
@@ -1261,10 +1342,15 @@ with st.sidebar:
 
 # Avoid loading data on every widget change: the full assessment uses one st.form.
 try:
-    students, bank, history, assignments = get_initial_data("Trainer" if role == "Trainer" and (mode != "Trainer – Dashboard" or st.session_state.get(f"trainer_report_requested:{selected_day}", False)) else "Học viên")
+    students, bank, history, assignments = get_initial_data("Trainer" if role == "Trainer" and mode != "Trainer – Chấm bài" and (mode != "Trainer – Dashboard" or st.session_state.get(f"trainer_report_requested:{selected_day}", False)) else "Học viên")
 except Exception as exc:
-    st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
-    st.exception(exc)
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        st.warning("Google Sheets đang giới hạn lượt truy cập. Chờ khoảng một phút rồi bấm Thử tải lại; tránh tải lại liên tục.")
+    else:
+        st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
+    if st.button("Thử tải lại dữ liệu"):
+        st.rerun()
     st.stop()
 
 names = [norm(x.get("Họ và tên")) for x in students if norm(x.get("Họ và tên"))]
@@ -1298,7 +1384,7 @@ if role == "Học viên":
                         st.warning("Email đã tồn tại. Liên hệ Trainer để thay đổi.")
                     else:
                         retry_sheets(lambda: ws.update_cell(row_index, col, new_email.strip()))
-                        records.clear()
+                        invalidate_records("Học viên")
                         st.success("Đã lưu email vào Google Sheets.")
                         st.rerun()
 
@@ -1312,7 +1398,7 @@ if role == "Học viên":
 if mode == "Xem báo cáo học tập":
     # Refresh explicitly to pick up Trainer edits without reloading on every widget interaction.
     if st.button("Làm mới báo cáo"):
-        records.clear()
+        invalidate_records()
         st.rerun()
     show_student_report(student, selected_day, history)
     st.stop()
@@ -1510,7 +1596,6 @@ if mode.startswith("Trainer"):
         batch_key = f"grading_v2:{selected_day}"
         batch = st.session_state.get(batch_key)
         if batch is None:
-            records.clear()
             submitted = [r for r in records("Bài kiểm tra")
                          if norm(r.get("Ngày")) == str(selected_day)
                          and norm(r.get("Trạng thái")) in ("Chờ chấm", "Đã phân loại", "Hoàn thành")]
@@ -1533,7 +1618,7 @@ if mode.startswith("Trainer"):
             if action:
                 try:
                     validate_v2_schema()
-                    records.clear()
+                    invalidate_records("Question Bank - L1", "Question Bank - L2/3/4", "Quy tắc đánh giá", "Câu trả lời", "Bài kiểm tra", "Lượt đánh giá")
                     bank = question_bank()
                     if action == "classify":
                         backup = "Backup_truoc_phan_loai_" + datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
@@ -1550,7 +1635,6 @@ if mode.startswith("Trainer"):
                 st.info(f"Đang xử lý: {norm(item.get('Học viên'))}")
                 try:
                     if batch["action"] == "classify":
-                        records.clear()
                         classify_session(item, question_bank())
                     else:
                         finalize_session(item, bank, students)
@@ -1558,14 +1642,14 @@ if mode.startswith("Trainer"):
                 except Exception as exc:
                     batch["failures"].append((norm(item.get("Học viên")), str(exc)))
                 batch["index"] += 1
-                records.clear()
+                invalidate_records()
                 st.rerun()
             st.success(f"Đã xử lý thành công {len(batch['successes'])}/{total} bài.")
             for name, error in batch["failures"]:
                 st.error(f"{name}: {error}")
             if st.button("Đóng kết quả xử lý"):
                 del st.session_state[batch_key]
-                records.clear()
+                invalidate_records()
                 st.rerun()
             st.caption("Giữ trang mở đến khi hoàn tất. Kết quả chỉ công bố khi Trainer duyệt gửi.")
         st.stop()
@@ -1574,13 +1658,13 @@ if mode.startswith("Trainer"):
         st.caption("Dữ liệu báo cáo chỉ được tải và tổng hợp khi Trainer yêu cầu.")
         report_key = f"trainer_report_requested:{selected_day}"
         if st.button("Tạo báo cáo", type="primary"):
-            records.clear()
+            invalidate_records()
             st.session_state[report_key] = True
         if not st.session_state.get(report_key, False):
             st.info("Bấm Tạo báo cáo để xem tổng quan lớp và tiến bộ học viên.")
             st.stop()
         if st.button("Làm mới báo cáo"):
-            records.clear()
+            invalidate_records()
             st.rerun()
         history = retry_sheets(lambda: records("Câu trả lời"))
         latest = {}
@@ -1694,7 +1778,7 @@ if mode.startswith("Trainer"):
                     success.append(name)
                 except Exception as exc:
                     failed.append(f"{name}: {exc}")
-            records.clear()
+            invalidate_records()
             if success:
                 st.success(f"Đã gửi thành công cho {len(success)} học viên: " + ", ".join(success))
             if failed:
@@ -1705,7 +1789,7 @@ if mode.startswith("Trainer"):
         st.subheader("Cảnh báo câu hỏi chưa đạt nhiều lần")
         st.caption("Toàn bộ học viên, mọi ngày đánh giá. Cùng Question ID, ít nhất 2 session kết luận Chưa đạt và lần trả lời gần nhất vẫn Chưa đạt.")
         if st.button("Làm mới cảnh báo"):
-            records.clear()
+            invalidate_records()
             st.rerun()
         warnings = repeated_unpassed_questions(history, students)
         a, b, c = st.columns(3)
