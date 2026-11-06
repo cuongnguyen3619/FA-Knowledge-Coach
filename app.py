@@ -482,7 +482,7 @@ def append_data_rows(ws, rows):
     """
     ws.spreadsheet.batch_update({"requests": [{"appendCells": {
         "sheetId": ws.id,
-        "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v if v is not None else "")}}
+        "rows": [{"values": [{"userEnteredValue": {"boolValue": v} if isinstance(v, bool) else {"stringValue": str(v if v is not None else "")}}
                               for v in row]} for row in rows],
         "fields": "userEnteredValue",
     }}]})
@@ -838,7 +838,7 @@ def sync_outside_ideas(rows):
             key = (norm(row["Session ID"]), norm(row["Question ID"]), idea)
             expected.add(key)
             if key not in known:
-                missing.append([row.get(h, "") for h in OUTSIDE_HEADERS[:8]] + [idea, "FALSE", "FALSE"])
+                missing.append([row.get(h, "") for h in OUTSIDE_HEADERS[:8]] + [idea, False, False])
                 known.add(key)
     if missing:
         # appendCells does not mistake the existing blank checkbox rows for a data table.
