@@ -801,7 +801,7 @@ def classify_session(assignment, bank):
                 result["Đáp án chuẩn đã duyệt"] = raw["Đáp án chuẩn đã duyệt"]
             result["Đánh giá từ Agent tham khảo đáp án gợi ý"] = result["Đánh giá từ Agent"]
             result.update({"Điểm cộng/trừ": "", "Tổng điểm": "", "Kết luận": "Chờ Trainer tổng hợp", "Đánh giá từ agent": "", "Trạng thái kiểm duyệt": "Classified v2", "Trạng thái gửi email": ""})
-            updates.append({"range": f"J{idx}:W{idx}", "values": [[result.get(h, "") for h in V2_HEADERS[9:]]]})
+            updates.append({"range": f"J{idx}:W{idx}", "values": [[result.get(h) if result.get(h) is not None else "" for h in V2_HEADERS[9:]]]})
         ws = sheet("Câu trả lời")
         fresh_rows, _ = session_evidence(assignment)
         if fresh_rows != rows:
