@@ -199,6 +199,20 @@ def update_assignment(sid, **values):
             return
     raise RuntimeError("Không tìm thấy bài kiểm tra để cập nhật")
 
+def correct_points_feedback(points):
+    """Store concise, supported correct ideas only in the feedback column."""
+    if not isinstance(points, list):
+        points = []
+    cleaned = []
+    for point in points:
+        if not isinstance(point, str):
+            continue
+        text = point.strip().lstrip("•- ").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    return "\n".join("• " + point for point in cleaned) or "Chưa xác định được ý đúng phù hợp với đáp án hướng dẫn."
+
+
 def grade_open(question, answer, max_points):
     key = st.secrets.get("OPENAI_API_KEY")
     if not key:
@@ -212,13 +226,23 @@ def grade_open(question, answer, max_points):
         messages=[
             {"role": "system", "content": (
                 "Bạn là giám khảo Ford Academy. Chỉ dựa trên câu hỏi và đáp án tham khảo của Trainer. "
-                "Đánh giá các ý đúng, thiếu, sai và mức độ hoàn thành; chấp nhận cách diễn đạt tương đương. "
+                "Chấm theo mức độ bao phủ các ý trong đáp án hướng dẫn. Chấp nhận từ đồng nghĩa, "
+                "viết tắt, lỗi chính tả nhỏ và cách diễn đạt tương đương về nội dung; "
+                "ví dụ Mobile Service tương đương sửa chữa/bảo dưỡng lưu động, "
+                "Cruise Control tương đương ga tự động hoặc kiểm soát hành trình. "
+                "Không yêu cầu học viên lặp nguyên văn hoặc giải thích thêm khi đáp án chỉ liệt kê. "
+                "Ý đúng một phần được ghi nhận đúng mức; không biến ý đúng thành ý thiếu vì khác câu chữ. "
+                "Chỉ cộng điểm cho ý vừa có trong câu trả lời vừa phù hợp đáp án hướng dẫn; "
+                "không cộng điểm cho kiến thức học viên chưa nêu. Thông tin ngoài phạm vi đáp án "
+                "không tự động bị coi là sai và không tự tạo lý do trừ điểm. "
                 "Không đòi hỏi rubric, không thêm tiêu chí hoặc dữ kiện ngoài đáp án tham khảo. "
                 "Trả JSON: ratio (0..1), correct_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
-                "Viết nhận xét tự nhiên, trực tiếp như giảng viên góp ý cho học viên: nêu điểm làm tốt, "
-                "điểm còn thiếu và gợi ý cải thiện cụ thể. Tuyệt đối không nhắc đến đáp án tham khảo, "
-                "đáp án mẫu, tài liệu đối chiếu hoặc việc so sánh với đáp án trong nội dung feedback. "
+                "correct_points chỉ liệt kê các ý học viên thực sự nói đúng, mỗi phần tử là một ý "
+                "ngắn gọn, cụ thể, không lời khen, không nhận xét thiếu/sai, không lời khuyên. "
+                "feedback chỉ gồm các ý trong correct_points, mỗi ý một dòng có dấu •; "
+                "không viết đoạn văn, không thêm phần tuy nhiên/cần bổ sung. "
+                "missing_points và incorrect_points chỉ dùng để lưu dữ liệu đánh giá nội bộ. "
                 "Nếu nguồn không đủ hoặc mơ hồ, needs_review=true."
             )},
             {"role": "user", "content": json.dumps({
@@ -227,8 +251,7 @@ def grade_open(question, answer, max_points):
             }, ensure_ascii=False)}
         ])
     data = json.loads(completion.choices[0].message.content)
-    if isinstance(data.get("feedback"), str):
-        data["feedback"] = clean_feedback_language(data["feedback"])
+    data["feedback"] = correct_points_feedback(data.get("correct_points"))
     ratio = min(1.0, max(0.0, float(data.get("ratio", 0))))
     return round(ratio * max_points, 2), data
 
@@ -503,7 +526,11 @@ def grade_submission(student, selected_day, order, bank, responses, sid):
             selected = sorted([x for x in answer.split(",") if x])
             correct = selected == sorted(q["_keys"])
             score = maximum if correct else 0
-            fb = {"feedback": "Chính xác." if correct else "Chưa chính xác.", "correct_points": ["Đúng đáp án"] if correct else [], "missing_points": [] if correct else ["Cần ôn tập câu hỏi"], "incorrect_points": []}
+            correct_points = [f"{k}. {q.get('_choices', {}).get(k, k)}"
+                              for k in selected if k in q["_keys"]]
+            fb = {"feedback": correct_points_feedback(correct_points),
+                  "correct_points": correct_points,
+                  "missing_points": [] if correct else ["Cần ôn tập câu hỏi"], "incorrect_points": []}
             needs_review = False
         else:
             score, fb = grade_open(q, answer, maximum)
