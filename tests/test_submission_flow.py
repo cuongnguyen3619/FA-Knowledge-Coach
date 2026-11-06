@@ -1,7 +1,7 @@
 import ast, copy, json, re, types, unittest
 from pathlib import Path
 source=(Path(__file__).resolve().parents[1] / 'app.py').read_text();tree=ast.parse(source)
-names={'append_data_rows','save_raw_answers','queue_submission','grade_pending_session','grade_submission','commit_results','learning_journey','norm','level','report_number'}
+names={'append_data_rows','save_raw_answers','queue_submission','grade_pending_session','grade_submission','commit_results','learning_journey','norm','level','report_number','correct_points_feedback'}
 body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names]
 def a1(row,col):
  s=''
@@ -65,4 +65,19 @@ class TestFlow(unittest.TestCase):
  def test_duplicate_raw_stops(self):
   self.save();self.raw.rows.append(copy.deepcopy(self.raw.rows[-1]))
   with self.assertRaises(RuntimeError):self.grade()
+
+class FeedbackFormatTests(unittest.TestCase):
+ def test_feedback_uses_supported_correct_points_only(self):
+  fake_result={'ratio':0.5,'correct_points':['Sửa chữa lưu động (Mobile Service)','Giao nhận xe tận nơi'], 'feedback':'Rất tốt. Tuy nhiên còn thiếu nhiều ý, hãy bổ sung.', 'missing_points':['Bảo dưỡng nhanh']}
+  response=types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=json.dumps(fake_result)))])
+  client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=lambda **kw:response)))
+  ns={'st':types.SimpleNamespace(secrets={'OPENAI_API_KEY':'test-only-placeholder'}),'OpenAI':lambda **kw:client,'json':json}
+  chosen=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'norm','grade_open','correct_points_feedback'}]
+  exec(compile(ast.Module(body=chosen,type_ignores=[]),'app.py','exec'),ns)
+  score,data=ns['grade_open']({'Câu hỏi':'Dịch vụ?','Đáp án tham khảo':'Mobile Service; giao nhận xe'},'Sửa chữa lưu động, giao nhận tận nơi',4)
+  self.assertEqual(score,2)
+  self.assertEqual(data['feedback'],'• Sửa chữa lưu động (Mobile Service)\n• Giao nhận xe tận nơi')
+  self.assertNotIn('Tuy nhiên',data['feedback'])
+  self.assertEqual(data['missing_points'],['Bảo dưỡng nhanh'])
+
 if __name__=='__main__':unittest.main(verbosity=2)
