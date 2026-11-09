@@ -27,7 +27,7 @@ PASS_RATIO = 0.70
 def is_passed(score, maximum):
     try:
         maximum = float(maximum)
-        return maximum > 0 and float(score) / maximum > PASS_RATIO
+        return maximum > 0 and float(score) / maximum >= PASS_RATIO
     except (TypeError, ValueError):
         return False
 
@@ -356,7 +356,7 @@ def grade_open(question, answer, max_points):
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
                 "trainer_rules": question.get("_trainer_rules", ""),
-                "stage_rules": "Agent chấm trọn gói theo trainer_rules mới nhất. Tạm thời không sử dụng Rubric riêng của câu hỏi. Cho phép đúng một phần, chấp nhận diễn đạt tương đương, không suy đoán ý mơ hồ, không chấm keyword cứng và không yêu cầu bước phân loại thủ công. Điểm cuối không vượt điểm tối đa và ngưỡng Đạt là trên 70%.",
+                "stage_rules": "Agent chấm trọn gói theo trainer_rules mới nhất. Tạm thời không sử dụng Rubric riêng của câu hỏi. Cho phép đúng một phần, chấp nhận diễn đạt tương đương, không suy đoán ý mơ hồ, không chấm keyword cứng và không yêu cầu bước phân loại thủ công. Điểm cuối không vượt điểm tối đa và ngưỡng Đạt là từ 70% trở lên.",
                 "answer": answer
             }, ensure_ascii=False)}
         ])
@@ -426,7 +426,7 @@ def show_final_report(order, completed, bank):
         st.write(f"**Level {lev}: {got:g}/{maximum:g} điểm ({ratio:.0%})**")
         if ratio >= .8:
             strengths.append(f"Level {lev}")
-        elif ratio <= PASS_RATIO:
+        elif ratio < PASS_RATIO:
             weak.append(f"Level {lev}")
     st.subheader("Nhận xét và lời khuyên")
     if strengths:
@@ -453,7 +453,7 @@ def show_final_report(order, completed, bank):
     else:
         st.write("Chưa ghi nhận ý thiếu hoặc sai cụ thể từ phần chấm tự động. Hãy xem lại các câu có điểm thấp.")
     st.markdown("**3 lời khuyên:**")
-    st.write("1. Ôn lại những câu có điểm chưa đạt (điểm không quá 70%), tập trung vào các ý còn thiếu đã được chỉ ra.")
+    st.write("1. Ôn lại những câu có điểm chưa đạt (điểm dưới 70%), tập trung vào các ý còn thiếu đã được chỉ ra.")
     st.write("2. Tự giải thích lại kiến thức bằng ngôn ngữ của mình, sau đó đối chiếu tài liệu đào tạo.")
     st.write("3. Luyện vận dụng kiến thức vào tình huống tư vấn khách hàng trước bài đánh giá tiếp theo.")
     st.caption("Nhận xét dựa trên điểm và dữ liệu chấm đã lưu; không dùng tiêu chí ngoài đáp án tham khảo.")
@@ -719,7 +719,7 @@ def learning_journey(results):
         total = sum(float(r.get("Điểm tối đa") or 0) for r in group)
         if total and got / total >= .8:
             strengths.append(f"Level {lev}")
-        elif total and got / total <= PASS_RATIO:
+        elif total and got / total < PASS_RATIO:
             gaps.append(f"Level {lev}")
     lines = [f"Kết quả tổng quan: {earned:g}/{maximum:g} điểm ({ratio:.0%})."]
     lines.append("Điểm mạnh: " + (", ".join(strengths) if strengths else "Cần tiếp tục phát triển kiến thức và kỹ năng."))
@@ -728,7 +728,7 @@ def learning_journey(results):
                                  for r in fresh if str(r.get("Kiến thức cần ôn tập") or "").strip()))
     if missing:
         lines.append("Nội dung ưu tiên ôn tập: " + "; ".join(missing[:5]))
-    lines.append("Khuyến nghị: Ôn các câu chưa đạt (điểm không quá 70%), đối chiếu đáp án Trainer và luyện tư vấn thực tế.")
+    lines.append("Khuyến nghị: Ôn các câu chưa đạt (điểm dưới 70%), đối chiếu đáp án Trainer và luyện tư vấn thực tế.")
     return "\n".join(lines)
 
 
@@ -887,7 +887,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                   if norm(r.get("Question ID")) not in review_ids and not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
     lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
              f"Học viên: {student}", f"Đại lý: {dealer}", f"Điểm: {earned:g}/{maximum:g}", "",
-             "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu chưa đạt (điểm không quá 70%), đối chiếu đáp án Trainer để làm tốt hơn.", ""]
+             "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu chưa đạt (điểm dưới 70%), đối chiếu đáp án Trainer để làm tốt hơn.", ""]
     if repeat_alerts:
         lines.extend(["", "KIẾN THỨC CẦN ƯU TIÊN ÔN TẬP"])
         for alert in repeat_alerts:
@@ -979,7 +979,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
         '</div>'
         '<div style="padding:16px;background:#eaf2fc;border-radius:8px;margin:16px 0;line-height:1.6">'
         '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
-        'các câu chưa đạt (điểm không quá 70%), đối chiếu đáp án Trainer để làm tốt hơn.</div>'
+        'các câu chưa đạt (điểm dưới 70%), đối chiếu đáp án Trainer để làm tốt hơn.</div>'
         + review_html + "".join(sections) + '</div></body></html>'
     )
     message = EmailMessage()
