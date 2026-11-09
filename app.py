@@ -1545,7 +1545,7 @@ if mode.startswith("Trainer"):
             for idx, item in enumerate(test["order"], 1):
                 q = bank[item["id"]]
                 result = result_by_id.get(item["id"], {})
-                st.markdown(f"### Câu {idx}/{len(test["order"])}")
+                st.markdown(f"### Câu {idx}/{len(test['order'])}")
                 panel("Câu hỏi", norm(q.get("Câu hỏi")), "question")
                 panel("Câu trả lời", norm(result.get("Câu trả lời") or (test.get("responses") or {}).get(item["id"])), "answer")
                 score = float(result.get("Điểm đạt") or 0)
