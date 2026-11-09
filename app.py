@@ -351,7 +351,7 @@ def grade_open(question, answer, max_points):
                 "outside_wrong_points (array strings), outside_uncertain_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
                 "Mỗi ý là một phần tử riêng, giữ nguyên điều kiện và ngữ cảnh, không lặp ý. "
-                "feedback phải là nhận xét hoàn chỉnh cho học viên, gồm ý đúng, ý cần bổ sung, ý ngoài đáp án được ghi nhận và ý sai rõ ràng nếu có. Không nhắc đến đáp án tham khảo, đáp án mẫu, Rubric, trainer_rules hoặc cách hệ thống đối chiếu trong feedback; hãy viết như nhận xét trực tiếp dành cho học viên."
+                "feedback phải theo đúng 4 mục ngắn gọn, theo đúng thứ tự: Các ý đã trình bày đúng; Các ý có thể bổ sung; Ý hay được cộng thêm điểm; Ý sai/không phù hợp. Chỉ liệt kê ý ngắn gọn, không lan man; mục nào không có ý thì ghi Không có. Không nhắc đến đáp án tham khảo, đáp án mẫu, Rubric, trainer_rules hoặc cách hệ thống đối chiếu trong feedback; hãy viết như nhận xét trực tiếp dành cho học viên."
             )},
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
@@ -674,7 +674,10 @@ def grade_submission(student, selected_day, order, bank, responses, sid):
                 q_for_grade["_trainer_rules"] = trainer_rules
             score, fb = grade_open(q_for_grade, answer, maximum)
             needs_review = bool(fb.get("needs_review", False))
-        fb["feedback"] = clean_feedback_language(fb.get("feedback", ""))
+        if level(q) in (2, 3, 4):
+            fb["feedback"] = format_agent_feedback(fb)
+        else:
+            fb["feedback"] = clean_feedback_language(fb.get("feedback", ""))
         output.append({"Session ID": sid, "Họ và tên": student, "Ngày": selected_day,
                        "Question ID": qid, "Ngày nội dung": q.get("Ngày nội dung"), "Module": q.get("Module"),
                        "Level": level(q), "Câu hỏi": q.get("Câu hỏi"), "Câu trả lời": answer,
@@ -1016,6 +1019,36 @@ def clean_feedback_language(value):
     result = re.sub(r"\s+([,.])", r"\1", result)
     result = re.sub(r" {2,}", " ", result)
     return result.strip()
+
+
+def format_agent_feedback(feedback):
+    """Render concise learner feedback in the four agreed sections."""
+    if not isinstance(feedback, dict):
+        return clean_feedback_language(feedback)
+    groups = [
+        ("Các ý đã trình bày đúng", ("correct_points",)),
+        ("Các ý có thể bổ sung", ("missing_points",)),
+        ("Ý hay được cộng thêm điểm", ("outside_correct_points",)),
+        ("Ý sai/không phù hợp", ("incorrect_points", "outside_wrong_points")),
+    ]
+    lines = []
+    for title, fields in groups:
+        items = []
+        for field in fields:
+            values = feedback.get(field, [])
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                item = clean_feedback_language(value).lstrip("•- ").strip()
+                if item and item not in items:
+                    items.append(item)
+        lines.append(title + ":")
+        lines.extend("- " + item for item in items[:5])
+        if not items:
+            lines.append("- Không có.")
+    return "\n".join(lines)
 
 def report_feedback(value):
     """Support both JSON Agent feedback and Trainer-edited plain text."""
