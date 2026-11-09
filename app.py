@@ -351,7 +351,7 @@ def grade_open(question, answer, max_points):
                 "outside_wrong_points (array strings), outside_uncertain_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
                 "Mỗi ý là một phần tử riêng, giữ nguyên điều kiện và ngữ cảnh, không lặp ý. "
-                "feedback phải theo đúng 4 mục ngắn gọn, theo đúng thứ tự: Các ý đã trình bày đúng; Các ý có thể bổ sung; Ý hay được cộng thêm điểm; Ý sai/không phù hợp. Chỉ liệt kê ý ngắn gọn, không lan man; mục nào không có ý thì ghi Không có. Không nhắc đến đáp án tham khảo, đáp án mẫu, Rubric, trainer_rules hoặc cách hệ thống đối chiếu trong feedback; hãy viết như nhận xét trực tiếp dành cho học viên."
+                "feedback phải theo đúng 4 mục ngắn gọn, theo đúng thứ tự: Các ý đã trình bày đúng; Các ý có thể bổ sung; Ý hay được cộng thêm điểm; Ý sai/không phù hợp. Mục Các ý có thể bổ sung phải nêu ý còn thiếu cụ thể, để hệ thống diễn đạt theo mẫu “Tuy nhiên, bạn chưa đề cập: ... Bạn có thể thêm ý này để phần tư vấn thuyết phục hơn.” Chỉ liệt kê ý ngắn gọn, không lan man; mục nào không có ý thì ghi Không có. Không nhắc đến đáp án tham khảo, đáp án mẫu, Rubric, trainer_rules hoặc cách hệ thống đối chiếu trong feedback; hãy viết như nhận xét trực tiếp dành cho học viên."
             )},
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
@@ -1045,8 +1045,13 @@ def format_agent_feedback(feedback):
                 if item and item not in items:
                     items.append(item)
         lines.append(title + ":")
-        lines.extend("- " + item for item in items[:5])
-        if not items:
+        if items:
+            for item in items[:5]:
+                if title == "Các ý có thể bổ sung":
+                    lines.append("- Tuy nhiên, bạn chưa đề cập: " + item + ". Bạn có thể thêm ý này để phần tư vấn thuyết phục hơn.")
+                else:
+                    lines.append("- " + item)
+        else:
             lines.append("- Không có.")
     return "\n".join(lines)
 
