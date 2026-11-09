@@ -23,6 +23,7 @@ APPROVED = {"approved", "đã duyệt"}
 LEVEL_COUNTS = {1: 6, 2: 3, 3: 2, 4: 2}
 POINTS = {1: 1, 2: 2, 3: 4, 4: 6}
 PASS_RATIO = 0.70
+VECTOR_STORE_ID = str(st.secrets.get("OPENAI_VECTOR_STORE_ID", "vs_6aa3c4ac78b08191b4b4e8e3bf6ecf33")).strip()
 
 def is_passed(score, maximum):
     try:
@@ -324,6 +325,62 @@ def correct_points_feedback(points):
     return "\n".join("• " + point for point in cleaned) or "Chưa xác định được ý đúng phù hợp với đáp án hướng dẫn."
 
 
+def should_use_vector_store(question):
+    """Enable Ford product retrieval only when the question's Rubric requests it."""
+    rubric = norm(question.get("Rubric"))
+    if not rubric:
+        return False
+    compact = " ".join(rubric.casefold().split())
+    negative = any(phrase in compact for phrase in ("không dùng", "không tra", "không sử dụng"))
+    markers = (
+        "ford_comparison_data.json",
+        "ford_comparison",
+        "vector store",
+        "vector_store",
+        "[nguồn: ford comparison",
+        "[nguồn đối chiếu]",
+    )
+    return any(marker in compact for marker in markers) and not negative
+
+
+def vector_store_context(client, question, answer):
+    if not should_use_vector_store(question):
+        return ""
+    if not VECTOR_STORE_ID:
+        raise RuntimeError("Chưa cấu hình OPENAI_VECTOR_STORE_ID cho câu hỏi yêu cầu tra cứu Ford Product data")
+    rubric = norm(question.get("Rubric"))
+    query = (
+        "Question: " + norm(question.get("Câu hỏi")) + chr(10)
+        + "Learner answer: " + norm(answer) + chr(10)
+        + "Rubric: " + rubric
+    )
+    page = client.vector_stores.search(
+        vector_store_id=VECTOR_STORE_ID,
+        query=query,
+        max_num_results=8,
+    )
+    chunks = []
+    for item in (getattr(page, "data", None) or []):
+        if isinstance(item, dict):
+            filename = item.get("filename", "")
+            score = item.get("score", "")
+            parts = item.get("content", []) or []
+        else:
+            filename = getattr(item, "filename", "")
+            score = getattr(item, "score", "")
+            parts = getattr(item, "content", []) or []
+        texts = []
+        for part in parts:
+            text = part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
+            if text:
+                texts.append(str(text))
+        if texts:
+            chunks.append(
+                f"[Nguồn: {filename}; score={score}]" + chr(10) + chr(10).join(texts)
+            )
+    return chr(10) + chr(10).join(chunks) or "VECTOR_STORE_NO_MATCH"
+
+
 def grade_open(question, answer, max_points):
     key = st.secrets.get("OPENAI_API_KEY")
     if not key:
@@ -331,6 +388,7 @@ def grade_open(question, answer, max_points):
     if not norm(question.get("Đáp án tham khảo")):
         raise RuntimeError("Câu hỏi thiếu đáp án tham khảo; Trainer cần bổ sung")
     client = OpenAI(api_key=key)
+    knowledge_context = vector_store_context(client, question, answer)
     completion = client.chat.completions.create(
         model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
         temperature=0, response_format={"type": "json_object"},
@@ -338,6 +396,7 @@ def grade_open(question, answer, max_points):
             {"role": "system", "content": (
                 "Bạn là giám khảo Ford Academy. Căn cứ chấm gồm câu hỏi, đáp án tham khảo đã được Trainer duyệt "
                 "và trainer_rules là phiên bản mới nhất của tab Quy tắc đánh giá trong Google Sheet. "
+                "knowledge_context là các đoạn dữ liệu được truy xuất từ Ford Product Vector Store; chỉ dùng nó khi Rubric yêu cầu, "
                 "Nếu trường Rubric riêng của câu hỏi có nội dung, bắt buộc đọc và áp dụng; nếu Rubric trống thì bỏ qua Rubric và không tự tạo tiêu chí từ Rubric. "
                 "Tuân thủ trainer_rules: hiểu ý theo ngữ cảnh; chấp nhận từ đồng nghĩa, viết tắt, lỗi chính tả nhỏ "
                 "và cách diễn đạt tương đương; không thêm kiến thức học viên chưa thể hiện; không suy đoán khi câu trả lời mơ hồ; "
@@ -357,6 +416,7 @@ def grade_open(question, answer, max_points):
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
                 "rubric": question.get("Rubric", ""),
                 "trainer_rules": question.get("_trainer_rules", ""),
+                "knowledge_context": knowledge_context,
                 "stage_rules": "Agent chấm trọn gói theo trainer_rules mới nhất. Nếu Rubric có nội dung thì bắt buộc áp dụng; nếu Rubric trống thì bỏ qua. Tách từng ý hoặc mệnh đề độc lập, không dùng nhãn đúng một phần; thông số trái Rubric là sai rõ ràng. Với câu Đèn Matrix, 9 chip LED là đúng theo Rubric và 12 chip LED là sai/không phù hợp, không cộng điểm. Chấp nhận diễn đạt tương đương, không suy đoán ý mơ hồ, không chấm keyword cứng và không yêu cầu bước phân loại thủ công. Điểm cuối không vượt điểm tối đa và ngưỡng Đạt là từ 70% trở lên. Giá trị “Chưa có dữ liệu”, “-”, null hoặc ô trống là chưa đủ căn cứ; không được hiểu là “Không có”, không suy đoán và không cộng/trừ điểm.",
                 "answer": answer
             }, ensure_ascii=False)}
