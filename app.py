@@ -914,8 +914,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
                           f"Trả lời: {answer}",
                           f"Điểm: {report_number(effective_score(r)):g}/{report_number(r.get('Điểm tối đa')):g}",
-                          f"Nhận xét: {norm(fb.get('feedback'))}",
-                          f"Đáp án tham khảo: {reference}", ""])
+                          f"Nhận xét: {norm(fb.get('feedback'))}", ""])
     # HTML email: readable on Gmail/mobile; text/plain remains as fallback.
     from html import escape as html_escape
     def h(value):
@@ -944,8 +943,9 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                 f'border-radius:5px;margin:14px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
                 f'<div style="margin-top:8px;line-height:1.65;color:#263445">{h(feedback)}</div></div>'
             )
-        detail += (f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">'
-                   f'{"Đáp án" if is_l1 else "Đáp án tham khảo"}:</span> {h(reference)}</div>')
+        if is_l1:
+            detail += (f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">'
+                       f'Đáp án:</span> {h(reference)}</div>')
         sections.append(
             f'<div style="border:1px solid #e2e8f0;border-radius:10px;padding:20px;'
             f'margin:18px 0;background:#ffffff">'
@@ -1158,18 +1158,6 @@ def show_student_report(student, selected_day, history):
             comment = fb.get("feedback")
             if comment:
                 panel("Nhận xét", comment, "feedback")
-            for key, label in (("correct_points", "Ý đúng"),
-                               ("missing_points", "Ý còn thiếu"),
-                               ("incorrect_points", "Ý chưa chính xác")):
-                values = fb.get(key, [])
-                if isinstance(values, list) and values:
-                    st.markdown(f"**{label}:**")
-                    for value in values:
-                        st.write("•", value)
-            suggested = (fb.get("suggested_answer") or fb.get("model_answer")
-                         or r.get("Đáp án chuẩn đã duyệt"))
-            if suggested:
-                panel("Đáp án gợi ý", suggested, "reference")
             if norm(r.get("Kiến thức cần ôn tập")):
                 st.caption("Cần ôn: " + norm(r.get("Kiến thức cần ôn tập")))
 
