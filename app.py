@@ -1469,18 +1469,13 @@ if mode.startswith("Trainer"):
         st.stop()
     if mode == "Trainer – Chấm bài":
         st.subheader(f"Chấm điểm – Ngày {selected_day}")
-        st.caption("Trainer chỉ cần bấm Chấm điểm. Agent sẽ đọc toàn bộ câu trả lời, áp dụng Quy tắc đánh giá mới nhất và tự ghi điểm, nhận xét, ý đúng, ý thiếu, ý sai và ý ngoài đáp án. Không còn bước Phân loại hay Tổng hợp riêng.")
         batch_key = f"grading_agent:{selected_day}"
         batch = st.session_state.get(batch_key)
         if batch is None:
-            submitted = [r for r in records("Bài kiểm tra")
-                         if norm(r.get("Ngày")) == str(selected_day)
-                         and norm(r.get("Trạng thái")) in ("Chờ chấm", "Đã chấm", "Hoàn thành")]
-            redo = st.checkbox("Chấm lại bài đã có kết quả bằng phiên bản hướng dẫn mới")
-            pending = [r for r in submitted if norm(r.get("Trạng thái")) == "Chờ chấm"
-                       or (redo and norm(r.get("Trạng thái")) in ("Đã chấm", "Hoàn thành"))]
+            pending = [r for r in records("Bài kiểm tra")
+                       if norm(r.get("Ngày")) == str(selected_day)
+                       and norm(r.get("Trạng thái")) == "Chờ chấm"]
             st.metric("Bài chờ chấm", len(pending))
-            st.caption("Sau khi Agent chấm xong, Trainer kiểm tra trực tiếp trong tab Câu trả lời rồi dùng mục Duyệt & gửi tất cả.")
             if st.button("Chấm điểm", type="primary", disabled=not pending):
                 invalidate_records("Question Bank - L1", "Question Bank - L2/3/4", "Quy tắc đánh giá", "Câu trả lời", "Bài kiểm tra", "Lượt đánh giá")
                 st.session_state[batch_key] = {"action": "grade", "queue": pending, "index": 0, "successes": [], "failures": []}
@@ -1506,7 +1501,6 @@ if mode.startswith("Trainer"):
                 del st.session_state[batch_key]
                 invalidate_records()
                 st.rerun()
-            st.caption("Giữ trang mở đến khi hoàn tất. Trainer vẫn kiểm tra nhận xét và điểm trước khi gửi email.")
         st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
