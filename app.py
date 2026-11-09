@@ -22,6 +22,15 @@ TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 APPROVED = {"approved", "đã duyệt"}
 LEVEL_COUNTS = {1: 6, 2: 3, 3: 2, 4: 2}
 POINTS = {1: 1, 2: 2, 3: 4, 4: 6}
+PASS_RATIO = 0.70
+
+def is_passed(score, maximum):
+    try:
+        maximum = float(maximum)
+        return maximum > 0 and float(score) / maximum > PASS_RATIO
+    except (TypeError, ValueError):
+        return False
+
 ASSIGN_HEADERS = ["Session ID", "Học viên", "Ngày", "Trạng thái", "Bắt đầu", "Kết thúc", "Danh sách câu JSON", "Số câu mới", "Số câu ôn", "Điểm mới", "Điểm tối đa", "Cập nhật lúc"]
 WARN_HEADERS = ["Học viên", "Question ID", "Số lần không đạt", "Điểm lần gần nhất (%)", "Nội dung cần ôn", "Thời gian", "Trạng thái"]
 
@@ -177,7 +186,12 @@ def question_bank():
     for row in records("Question Bank - L2/3/4"):
         qid = norm(row.get("Question ID"))
         if qid and level(row) in (2, 3, 4):
-            result[qid] = dict(row)
+            item = dict(row)
+            # The live Sheet uses the longer column title; normalize it for the grader.
+            item["Đáp án tham khảo"] = norm(
+                row.get("Đáp án tham khảo") or row.get("Đáp án tham khảo, ý chính")
+            )
+            result[qid] = item
     for row in records("Question Bank - L1"):
         qid = norm(row.get("Question ID"))
         if not qid or level(row) != 1:
@@ -215,7 +229,7 @@ def prior_failures(student, selected_day, bank, history=None):
         except (TypeError, ValueError):
             continue
         latest[qid] = earned / maximum
-    return sorted(qid for qid, ratio in latest.items() if ratio < 0.5)
+    return sorted(qid for qid, ratio in latest.items() if not is_passed(ratio, 1.0))
 
 def build_assignment(student, selected_day, bank, history=None):
     fresh = []
@@ -306,43 +320,47 @@ def grade_open(question, answer, max_points):
         temperature=0, response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": (
-                "Bạn là giám khảo Ford Academy. Chỉ dựa trên câu hỏi và đáp án tham khảo của Trainer. "
-                "Chấm theo mức độ bao phủ các ý trong đáp án hướng dẫn. Chấp nhận từ đồng nghĩa, "
-                "viết tắt, lỗi chính tả nhỏ và cách diễn đạt tương đương về nội dung; "
-                "ví dụ Mobile Service tương đương sửa chữa/bảo dưỡng lưu động, "
-                "Cruise Control tương đương ga tự động hoặc kiểm soát hành trình. "
-                "Không yêu cầu học viên lặp nguyên văn hoặc giải thích thêm khi đáp án chỉ liệt kê. "
-                "Ý đúng một phần được ghi nhận đúng mức; không biến ý đúng thành ý thiếu vì khác câu chữ. "
-                "Chỉ cộng điểm cho ý vừa có trong câu trả lời vừa phù hợp đáp án hướng dẫn; "
-                "không cộng điểm cho kiến thức học viên chưa nêu. Thông tin ngoài phạm vi đáp án "
-                "không tự động bị coi là sai và không tự tạo lý do trừ điểm. "
-                "Không đòi hỏi rubric, không thêm tiêu chí hoặc dữ kiện ngoài đáp án tham khảo. "
-                "Tách toàn bộ các ý học viên thực sự nêu: ý khớp hoặc tương đương vào correct_points; "
-                "mọi ý khác (kể cả ý có thể sai hoặc không liên quan) vào outside_points. "
-                "Mỗi phần tử outside_points là một ý riêng biệt, giữ nguyên điều kiện và ngữ cảnh; không suy diễn thêm. "
-                "Không lặp ý hoặc đưa cùng một ý vào cả hai nhóm. Không tự quyết định đúng sai cho outside_points. "
-                "Trả JSON: ratio (0..1), correct_points (array strings), outside_points (array strings), missing_points (array strings), "
+                "Bạn là giám khảo Ford Academy. Căn cứ chấm gồm câu hỏi, đáp án tham khảo đã được Trainer duyệt "
+                "và trainer_rules là phiên bản mới nhất của tab Quy tắc đánh giá trong Google Sheet. "
+                "Tạm thời KHÔNG sử dụng trường Rubric riêng của câu hỏi, kể cả khi trường đó có dữ liệu. "
+                "Tuân thủ trainer_rules: hiểu ý theo ngữ cảnh; chấp nhận từ đồng nghĩa, viết tắt, lỗi chính tả nhỏ "
+                "và cách diễn đạt tương đương; không thêm kiến thức học viên chưa thể hiện; không suy đoán khi câu trả lời mơ hồ; "
+                "chấm theo từng ý, cho phép ghi nhận đúng một phần và không tính trùng một ý nhiều lần. "
+                "Không chấm theo keyword cứng và không yêu cầu học viên lặp nguyên văn. "
+                "Agent phải tự chấm trọn gói, gồm ý đúng, ý thiếu, ý sai rõ ràng và ý ngoài đáp án; không yêu cầu bước phân loại thủ công. "
+                "ratio là điểm cuối trong khoảng 0..1, không vượt điểm tối đa. Ý ngoài đáp án đúng và liên quan có thể được tính trong điểm cuối "
+                "khi có căn cứ theo trainer_rules; ý ngoài đáp án mơ hồ thì không tính điểm; ý sai rõ ràng chỉ ghi nhận khi đủ căn cứ. "
+                "Không tự thêm kiến thức hoặc tự suy đoán. Nếu không chắc chắn, needs_review=true. "
+                "Trả JSON: ratio (0..1), correct_points (array strings), outside_correct_points (array strings), "
+                "outside_wrong_points (array strings), outside_uncertain_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
-                "correct_points chỉ liệt kê các ý học viên thực sự nói đúng, mỗi phần tử là một ý "
-                "ngắn gọn, cụ thể, không lời khen, không nhận xét thiếu/sai, không lời khuyên. "
-                "feedback chỉ gồm các ý trong correct_points, mỗi ý một dòng có dấu •; "
-                "không viết đoạn văn, không thêm phần tuy nhiên/cần bổ sung. "
-                "missing_points và incorrect_points chỉ dùng để lưu dữ liệu đánh giá nội bộ. "
-                "Nếu nguồn không đủ hoặc mơ hồ, needs_review=true."
+                "Mỗi ý là một phần tử riêng, giữ nguyên điều kiện và ngữ cảnh, không lặp ý. "
+                "feedback phải là nhận xét hoàn chỉnh cho học viên, gồm ý đúng, ý cần bổ sung, ý ngoài đáp án được ghi nhận và ý sai rõ ràng nếu có."
             )},
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
-                "rubric": question.get("Rubric", ""),
                 "trainer_rules": question.get("_trainer_rules", ""),
-                "stage_rules": "Lượt phân loại: ratio chỉ tính ý khớp đáp án, từ 0 đến 1. K chỉ liệt kê ý đúng; outside_points chỉ tách ý, chưa kết luận hay cộng/trừ. Quy trình này ưu tiên hơn hướng dẫn cũ về ý ngoài đáp án, giới hạn bonus hoặc văn phong phản hồi. Trainer duyệt đúng/sai trước khi hệ thống tính +10%/-5%; tổng cuối có thể vượt điểm tối đa.",
+                "stage_rules": "Agent chấm trọn gói theo trainer_rules mới nhất. Tạm thời không sử dụng Rubric riêng của câu hỏi. Cho phép đúng một phần, chấp nhận diễn đạt tương đương, không suy đoán ý mơ hồ, không chấm keyword cứng và không yêu cầu bước phân loại thủ công. Điểm cuối không vượt điểm tối đa và ngưỡng Đạt là trên 70%.",
                 "answer": answer
             }, ensure_ascii=False)}
         ])
     data = json.loads(completion.choices[0].message.content)
-    if not isinstance(data.get("outside_points"), list) or any(not isinstance(x, str) for x in data["outside_points"]):
-        raise RuntimeError("Agent chưa trả outside_points hợp lệ; chưa lưu phân loại.")
-    data["outside_points"] = unique_ideas(data["outside_points"])
-    data["feedback"] = correct_points_feedback(data.get("correct_points"))
+    list_fields = (
+        "correct_points", "outside_correct_points", "outside_wrong_points",
+        "outside_uncertain_points", "missing_points", "incorrect_points"
+    )
+    for field in list_fields:
+        values = data.get(field, [])
+        if not isinstance(values, list) or any(not isinstance(x, str) for x in values):
+            raise RuntimeError(f"Agent trả {field} không hợp lệ; chưa lưu kết quả.")
+        data[field] = unique_ideas(values)
+    outside = []
+    outside.extend("Đúng ngoài đáp án: " + x for x in data.get("outside_correct_points", []))
+    outside.extend("Sai rõ ràng ngoài đáp án: " + x for x in data.get("outside_wrong_points", []))
+    outside.extend("Chưa đủ căn cứ: " + x for x in data.get("outside_uncertain_points", []))
+    data["outside_points"] = unique_ideas(outside)
+    if not isinstance(data.get("feedback"), str):
+        data["feedback"] = ""
     ratio = min(1.0, max(0.0, float(data.get("ratio", 0))))
     return round(ratio * max_points, 2), data
 
@@ -351,7 +369,7 @@ def save_answer(sid, student, selected_day, q, response, score, maximum, feedbac
         sid, student, selected_day, q.get("Question ID"), q.get("Ngày nội dung"),
         q.get("Module"), level(q), q.get("Câu hỏi"), response,
         q.get("Đáp án tham khảo") or q.get("Đáp án đề gốc"), json.dumps(feedback, ensure_ascii=False),
-        score, maximum, "Cần Trainer kiểm duyệt" if review else ("Đạt" if score/maximum >= 0.5 else "Chưa đạt"),
+        score, maximum, "Cần Trainer kiểm duyệt" if review else ("Đạt" if is_passed(score, maximum) else "Chưa đạt"),
         "; ".join(feedback.get("missing_points", [])), q.get("Trang nguồn") or q.get("File nguồn"),
         timestamp(), "Pending Trainer review" if review else "Auto graded",
     ], value_input_option="RAW")
@@ -368,7 +386,7 @@ def trainer_warnings(student, history=None):
                 continue
         except (TypeError, ValueError):
             continue
-        if score / maximum < 0.5:
+        if not is_passed(score, maximum):
             failed.setdefault(norm(x.get("Question ID")), []).append(x)
     return {qid: attempts for qid, attempts in failed.items() if len(attempts) >= 2}
 
@@ -392,7 +410,7 @@ def show_final_report(order, completed, bank):
         st.write(f"**Level {lev}: {got:g}/{maximum:g} điểm ({ratio:.0%})**")
         if ratio >= .8:
             strengths.append(f"Level {lev}")
-        elif ratio < .5:
+        elif ratio <= PASS_RATIO:
             weak.append(f"Level {lev}")
     st.subheader("Nhận xét và lời khuyên")
     if strengths:
@@ -419,7 +437,7 @@ def show_final_report(order, completed, bank):
     else:
         st.write("Chưa ghi nhận ý thiếu hoặc sai cụ thể từ phần chấm tự động. Hãy xem lại các câu có điểm thấp.")
     st.markdown("**3 lời khuyên:**")
-    st.write("1. Ôn lại những câu có điểm dưới 50%, tập trung vào các ý còn thiếu đã được chỉ ra.")
+    st.write("1. Ôn lại những câu có điểm chưa đạt (điểm không quá 70%), tập trung vào các ý còn thiếu đã được chỉ ra.")
     st.write("2. Tự giải thích lại kiến thức bằng ngôn ngữ của mình, sau đó đối chiếu tài liệu đào tạo.")
     st.write("3. Luyện vận dụng kiến thức vào tình huống tư vấn khách hàng trước bài đánh giá tiếp theo.")
     st.caption("Nhận xét dựa trên điểm và dữ liệu chấm đã lưu; không dùng tiêu chí ngoài đáp án tham khảo.")
@@ -599,13 +617,24 @@ def grade_pending_session(assignment, bank, students):
             result["Điểm tối đa"] = report_number(result["Điểm tối đa"])
             result["review"] = item.get("review", False)
             results.append(result)
-        return commit_results(sid, student, selected_day, order, results, students)
+        committed = commit_results(sid, student, selected_day, order, results, students)
+        update_assignment(sid, **{"Trạng thái": "Đã chấm", "Cập nhật lúc": timestamp()})
+        return committed
     results = grade_submission(student, selected_day, order, bank, responses, sid)
-    return commit_results(sid, student, selected_day, order, results, students)
+    committed = commit_results(sid, student, selected_day, order, results, students)
+    update_assignment(sid, **{"Trạng thái": "Đã chấm", "Cập nhật lúc": timestamp()})
+    return committed
 
 
 def grade_submission(student, selected_day, order, bank, responses, sid):
     output = []
+    trainer_rules = next(
+        (norm(q.get("_trainer_rules")) for q in bank.values() if norm(q.get("_trainer_rules"))),
+        ""
+    )
+    if not trainer_rules and any(level(bank[item["id"]]) in (2, 3, 4) for item in order):
+        rules = retry_sheets(lambda: sheet("Quy tắc đánh giá").get("A7:B32"))
+        trainer_rules = "\n".join(" | ".join(str(v) for v in r) for r in rules if any(r))
     for item in order:
         qid = item["id"]
         q = bank[qid]
@@ -624,17 +653,25 @@ def grade_submission(student, selected_day, order, bank, responses, sid):
                   "missing_points": [] if correct else ["Cần ôn tập câu hỏi"], "incorrect_points": []}
             needs_review = False
         else:
-            score, fb = grade_open(q, answer, maximum)
+            q_for_grade = dict(q)
+            if not norm(q_for_grade.get("_trainer_rules")):
+                q_for_grade["_trainer_rules"] = trainer_rules
+            score, fb = grade_open(q_for_grade, answer, maximum)
             needs_review = bool(fb.get("needs_review", False))
         output.append({"Session ID": sid, "Họ và tên": student, "Ngày": selected_day,
                        "Question ID": qid, "Ngày nội dung": q.get("Ngày nội dung"), "Module": q.get("Module"),
                        "Level": level(q), "Câu hỏi": q.get("Câu hỏi"), "Câu trả lời": answer,
                        "Đáp án tham khảo": q.get("Đáp án tham khảo") or q.get("Đáp án đề gốc"),
-                       "Đánh giá từ Agent": fb.get("feedback", ""), "Nội dung ngoài đáp án": "\n".join(fb.get("outside_points", [])), "Điểm đạt": score,
-                       "Điểm tối đa": maximum, "Kết quả": "Cần Trainer kiểm duyệt" if needs_review else ("Đạt" if score/maximum >= 0.5 else "Chưa đạt"),
-                       "Nội dung cần ôn": "; ".join(fb.get("missing_points", [])),
+                       "Đánh giá từ Agent": fb.get("feedback", ""), "Đánh giá từ Agent tham khảo đáp án gợi ý": fb.get("feedback", ""),
+                       "Nội dung ngoài đáp án": "\n".join(fb.get("outside_points", [])), "Điểm đạt": score,
+                       "Điểm cộng/trừ": 0, "Tổng điểm": score,
+                       "Điểm tối đa": maximum, "Kết quả": "Cần Trainer kiểm duyệt" if needs_review else ("Đạt" if is_passed(score, maximum) else "Chưa đạt"),
+                       "Kết luận": "Đạt" if is_passed(score, maximum) else "Chưa đạt",
+                       "Đánh giá từ agent": fb.get("feedback", ""),
+                       "Trạng thái gửi email": "",
+                       "Nội dung cần ôn": "; ".join(unique_ideas(fb.get("missing_points", []) + fb.get("incorrect_points", []))),
                        "Trang nguồn": q.get("Trang nguồn") or q.get("File nguồn"),
-                       "Thời gian": timestamp(), "Trạng thái kiểm duyệt": "Pending Trainer review" if needs_review else "Auto graded",
+                       "Thời gian": timestamp(), "Trạng thái kiểm duyệt": "Agent graded - cần Trainer xem xét" if needs_review else "Agent graded",
                        "review": item.get("review", False)})
     aliases = {"Ngày đánh giá": "Ngày", "Nội dung trả lời học viên": "Câu trả lời",
                "Đáp án chuẩn đã duyệt": "Đáp án tham khảo", "Kết luận": "Kết quả",
@@ -662,7 +699,7 @@ def learning_journey(results):
         total = sum(float(r.get("Điểm tối đa") or 0) for r in group)
         if total and got / total >= .8:
             strengths.append(f"Level {lev}")
-        elif total and got / total < .5:
+        elif total and got / total <= PASS_RATIO:
             gaps.append(f"Level {lev}")
     lines = [f"Kết quả tổng quan: {earned:g}/{maximum:g} điểm ({ratio:.0%})."]
     lines.append("Điểm mạnh: " + (", ".join(strengths) if strengths else "Cần tiếp tục phát triển kiến thức và kỹ năng."))
@@ -671,7 +708,7 @@ def learning_journey(results):
                                  for r in fresh if str(r.get("Kiến thức cần ôn tập") or "").strip()))
     if missing:
         lines.append("Nội dung ưu tiên ôn tập: " + "; ".join(missing[:5]))
-    lines.append("Khuyến nghị: Ôn các câu dưới 50%, đối chiếu đáp án Trainer và luyện tư vấn thực tế.")
+    lines.append("Khuyến nghị: Ôn các câu chưa đạt (điểm không quá 70%), đối chiếu đáp án Trainer và luyện tư vấn thực tế.")
     return "\n".join(lines)
 
 
@@ -779,9 +816,8 @@ def commit_results(sid, student, selected_day, order, results, students):
     return fresh_score
 
 
-# Two-stage assessment. A:I are immutable learner evidence.
-V2_HEADERS = ["Session ID", "Họ và tên", "Ngày đánh giá", "Question ID", "Ngày khóa học", "Module", "Level", "Câu hỏi", "Nội dung trả lời học viên", "Đáp án chuẩn đã duyệt", "Đánh giá từ Agent tham khảo đáp án gợi ý", "Điểm đạt", "Nội dung ngoài đáp án", "Điểm cộng/trừ", "Tổng điểm", "Điểm tối đa", "Kết luận", "Đánh giá từ agent", "Kiến thức cần ôn tập", "Nguồn đối chiếu", "Thời gian trả lời", "Trạng thái kiểm duyệt", "Trạng thái gửi email"]
-OUTSIDE_HEADERS = V2_HEADERS[:8] + ["Kiến thức ngoài đáp án", "Đúng", "Sai"]
+# Single-stage Agent grading. A:I are immutable learner evidence.
+V2_HEADERS = ["Session ID", "Họ và tên", "Ngày đánh giá", "Question ID", "Ngày khóa học", "Module", "Level", "Câu hỏi", "Nội dung trả lời học viên", "Đáp án chuẩn đã duyệt", "Đánh giá từ Agent tham khảo đáp án gợi ý", "Điểm đạt", "Điểm cộng/trừ", "Tổng điểm", "Điểm tối đa", "Kết luận", "Kiến thức cần ôn tập", "Nguồn đối chiếu", "Thời gian trả lời", "Trạng thái kiểm duyệt", "Trạng thái gửi email"]
 
 
 def unique_ideas(items):
@@ -803,183 +839,6 @@ def effective_score(row):
 def effective_comment(row):
     return (row.get("Đánh giá từ agent") or row.get("Đánh giá từ Agent")
             or row.get("Đánh giá từ Agent tham khảo đáp án gợi ý"))
-
-
-def validate_v2_schema():
-    if sheet("Câu trả lời").row_values(1) != V2_HEADERS:
-        raise RuntimeError("Cột A:W không đúng cấu trúc đã chốt. Dừng để bảo vệ dữ liệu.")
-    if sheet("Đánh giá ngoài đáp án").row_values(1)[:11] != OUTSIDE_HEADERS:
-        raise RuntimeError("Sheet Đánh giá ngoài đáp án cần đúng các cột A:K đã chốt.")
-
-
-def session_evidence(assignment):
-    sid = norm(assignment.get("Session ID"))
-    order = json.loads(assignment.get("Danh sách câu JSON") or "[]")
-    ids = [x["id"] for x in order]
-    values = retry_sheets(lambda: sheet("Câu trả lời").get_all_values(value_render_option="UNFORMATTED_VALUE"))
-    rows = [(i, dict(zip(values[0], r + [""] * (len(values[0])-len(r)))))
-            for i, r in enumerate(values[1:], 2) if r and r[0] == sid]
-    if not sid or not ids or len(ids) != len(set(ids)) or len(rows) != len(ids) or {norm(r.get("Question ID")) for _, r in rows} != set(ids):
-        raise RuntimeError("Câu trả lời thiếu/trùng hoặc không khớp bộ đề; không xử lý.")
-    for _, r in rows:
-        if norm(r.get("Họ và tên")) != norm(assignment.get("Học viên")) or norm(r.get("Ngày đánh giá")) != norm(assignment.get("Ngày")) or not norm(r.get("Nội dung trả lời học viên")):
-            raise RuntimeError("Thông tin học viên/ngày/câu trả lời gốc không hợp lệ.")
-    return rows, order
-
-
-def sync_outside_ideas(rows):
-    ws = sheet("Đánh giá ngoài đáp án")
-    values = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
-    known = {(norm(r[0]), norm(r[3]), norm(r[8])) for r in values[1:] if len(r) >= 9 and norm(r[0])}
-    missing = []
-    expected = set()
-    for _, row in rows:
-        for idea in unique_ideas(str(row.get("Nội dung ngoài đáp án") or "").splitlines()):
-            key = (norm(row["Session ID"]), norm(row["Question ID"]), idea)
-            expected.add(key)
-            if key not in known:
-                missing.append([row.get(h, "") for h in OUTSIDE_HEADERS[:8]] + [idea, False, False])
-                known.add(key)
-    if missing:
-        # appendCells does not mistake the existing blank checkbox rows for a data table.
-        append_data_rows(ws, missing)
-    check = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
-    present = {(norm(r[0]), norm(r[3]), norm(r[8])) for r in check[1:] if len(r) >= 9}
-    if not expected <= present:
-        raise RuntimeError("Chưa xác minh lưu đủ các ý ngoài đáp án. Chạy Phân loại lại để đồng bộ, không cần chấm lại.")
-    if len(check) > 1:
-        ws.spreadsheet.batch_update({"requests": [{"setDataValidation": {
-            "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": len(check), "startColumnIndex": 9, "endColumnIndex": 11},
-            "rule": {"condition": {"type": "BOOLEAN"}, "strict": True, "showCustomUi": True}}}]})
-
-
-def classify_session(assignment, bank):
-    validate_v2_schema()
-    rows, order = session_evidence(assignment)
-    # Always refresh Question Bank and grading rules when the Trainer starts a batch.
-    # A cached bank from before a Sheet edit must never silently replace column J.
-    sid = norm(assignment["Session ID"])
-    student, selected_day = norm(assignment["Học viên"]), int(assignment["Ngày"])
-    if not all(norm(r.get("Trạng thái kiểm duyệt")) == "Classified v2" for _, r in rows):
-        responses = {r["Question ID"]: r["Nội dung trả lời học viên"] for _, r in rows}
-        live_bank = dict(bank)
-        rules = retry_sheets(lambda: sheet("Quy tắc đánh giá").get("A7:B32"))
-        trainer_rules = "\n".join(" | ".join(str(v) for v in r) for r in rules if any(r))
-        for _, raw in rows:
-            qid = raw["Question ID"]
-            q = dict(live_bank.get(qid, {}))
-            q.update({"Question ID": qid, "Câu hỏi": raw["Câu hỏi"], "Level": raw["Level"],
-                      "_trainer_rules": trainer_rules})
-            if norm(raw.get("Đáp án chuẩn đã duyệt")) and level(q) != 1:
-                q["Đáp án tham khảo"] = raw["Đáp án chuẩn đã duyệt"]
-            live_bank[qid] = q
-        results = grade_submission(student, selected_day, order, live_bank, responses, sid)
-        by_id = {r["Question ID"]: r for r in results}
-        updates = []
-        for idx, raw in rows:
-            result = by_id[raw["Question ID"]]
-            if norm(raw.get("Đáp án chuẩn đã duyệt")):
-                result["Đáp án chuẩn đã duyệt"] = raw["Đáp án chuẩn đã duyệt"]
-            result["Đánh giá từ Agent tham khảo đáp án gợi ý"] = result["Đánh giá từ Agent"]
-            result.update({"Điểm cộng/trừ": "", "Tổng điểm": "", "Kết luận": "Chờ Trainer tổng hợp", "Đánh giá từ agent": "", "Trạng thái kiểm duyệt": "Classified v2", "Trạng thái gửi email": ""})
-            updates.append({"range": f"J{idx}:W{idx}", "values": [[result.get(h) if result.get(h) is not None else "" for h in V2_HEADERS[9:]]]})
-        ws = sheet("Câu trả lời")
-        fresh_rows, _ = session_evidence(assignment)
-        if fresh_rows != rows:
-            raise RuntimeError("Sheets đã được chỉnh trong khi Agent phân loại. Chưa ghi kết quả; chạy lại để dùng dữ liệu mới.")
-        retry_sheets(lambda: ws.batch_update(updates, value_input_option="RAW"))
-        check, _ = session_evidence(assignment)
-        if any([r.get(h, "") for h in V2_HEADERS[:9]] != [old.get(h, "") for h in V2_HEADERS[:9]] for (_, r), (_, old) in zip(check, rows)):
-            raise RuntimeError("Dữ liệu gốc thay đổi; dừng xử lý.")
-        for (_, row), update in zip(check, updates):
-            if [row.get(h, "") for h in V2_HEADERS[9:]] != update["values"][0]:
-                raise RuntimeError("Chưa xác minh kết quả phân loại đã lưu đủ.")
-        rows = check
-    sync_outside_ideas(rows)
-    # Old completed summary must not appear as a current final result while reviewing.
-    sws = sheet("Lượt đánh giá")
-    summaries = retry_sheets(lambda: sws.get_all_values())
-    if summaries and "Trạng thái" in summaries[0]:
-        updates = [{"range": gspread.utils.rowcol_to_a1(i, summaries[0].index("Trạng thái")+1), "values": [["Đã phân loại"]]}
-                   for i, row in enumerate(summaries[1:], 2) if row and row[0] == sid]
-        if updates:
-            retry_sheets(lambda: sws.batch_update(updates, value_input_option="RAW"))
-    update_assignment(sid, **{"Trạng thái": "Đã phân loại", "Điểm mới": "", "Cập nhật lúc": timestamp()})
-    invalidate_records()
-
-
-def reviewed_adjustment(answer, decisions):
-    expected = unique_ideas(str(answer.get("Nội dung ngoài đáp án") or "").splitlines())
-    maximum = report_number(answer.get("Điểm tối đa"))
-    if maximum <= 0:
-        raise RuntimeError("Điểm tối đa không hợp lệ.")
-    accepted, rejected, seen = [], [], {}
-    for row in decisions:
-        idea = norm(row.get("Kiến thức ngoài đáp án"))
-        if not idea:
-            continue
-        if idea not in expected:
-            raise RuntimeError(f"Ý ngoài đáp án không khớp cột M: {idea}. Kiểm tra dòng test hoặc dòng đã sửa.")
-        if any(norm(row.get(h)) != norm(answer.get(h)) for h in OUTSIDE_HEADERS[:8]):
-            raise RuntimeError("Ý ngoài đáp án không thuộc đúng câu trả lời/học viên/ngày.")
-        yes = norm(row.get("Đúng")).casefold() == "true"
-        no = norm(row.get("Sai")).casefold() == "true"
-        if yes and no:
-            raise RuntimeError(f"Ý '{idea}' đang tích cả Đúng và Sai. Bỏ một lựa chọn trước khi tổng hợp.")
-        if idea in seen and seen[idea] != (yes, no):
-            raise RuntimeError(f"Dòng ý '{idea}' trùng với lựa chọn mâu thuẫn.")
-        seen[idea] = (yes, no)
-    if set(seen) != set(expected):
-        raise RuntimeError("Thiếu ý ở sheet Đánh giá ngoài đáp án. Chạy lại Phân loại để đồng bộ.")
-    for idea, (yes, no) in seen.items():
-        if yes: accepted.append(idea)
-        if no: rejected.append(idea)
-    delta = round(maximum * (.10 * len(accepted) - .05 * len(rejected)), 2)
-    lines = []
-    correct = norm(answer.get("Đánh giá từ Agent tham khảo đáp án gợi ý"))
-    if correct and not correct.startswith("Chưa xác định"):
-        lines.append("Các ý bạn trả lời đúng:\n" + correct)
-    else:
-        lines.append("Chưa xác định được ý trả lời đúng trong phần nội dung trọng tâm.")
-    if accepted:
-        lines.append("Đáng khen: bạn đã bổ sung các ý được Trainer công nhận:\n" + "\n".join(f"• {x} (+{maximum*.10:g} điểm)" for x in accepted))
-    if rejected:
-        lines.append("Cần điều chỉnh các ý Trainer đánh giá sai dưới đây; hãy đối chiếu tài liệu và trao đổi với Trainer để sửa lại:\n" + "\n".join(f"• {x} (−{maximum*.05:g} điểm)" for x in rejected))
-    return delta, "\n\n".join(lines), rejected
-
-
-def finalize_session(assignment, bank, students):
-    validate_v2_schema()
-    rows, order = session_evidence(assignment)
-    reviews = retry_sheets(lambda: sheet("Đánh giá ngoài đáp án").get_all_records(default_blank="", numericise_ignore=["all"]))
-    sid = norm(assignment["Session ID"])
-    related = [r for r in reviews if norm(r.get("Session ID")) == sid and norm(r.get("Kiến thức ngoài đáp án"))]
-    if any(norm(r.get("Trạng thái kiểm duyệt")).casefold() == "trainer approved" for _, r in rows):
-        raise RuntimeError("Bài đã được Trainer duyệt. Không ghi đè điểm và nhận xét đã duyệt.")
-    if any(norm(r.get("Question ID")) not in {x["id"] for x in order} for r in related):
-        raise RuntimeError("Có ý ngoài đáp án với Question ID không thuộc bộ đề.")
-    results = []
-    for _, row in rows:
-        if norm(row.get("Trạng thái kiểm duyệt")) not in ("Classified v2", "Finalized v2", "Trainer approved") or row.get("Điểm đạt") in ("", None):
-            raise RuntimeError("Bài chưa Phân loại câu trả lời đầy đủ.")
-        qid = norm(row["Question ID"])
-        delta, comment, rejected = reviewed_adjustment(row, [r for r in related if norm(r.get("Question ID")) == qid])
-        base = report_number(row["Điểm đạt"])
-        total = round(base + delta, 2)
-        result = dict(row)
-        result.update({"Điểm theo đáp án": base, "Điểm đạt": total, "Điểm cộng/trừ": delta, "Tổng điểm": total,
-                       "Điểm tối đa": report_number(row["Điểm tối đa"]), "Đánh giá từ agent": comment,
-                       "Kết luận": "Đạt" if total / report_number(row["Điểm tối đa"]) >= .5 else "Chưa đạt",
-                       "Trạng thái kiểm duyệt": "Finalized v2", "Trạng thái gửi email": "",
-                       "Kiến thức cần ôn tập": "; ".join(unique_ideas([norm(row.get("Kiến thức cần ôn tập"))] + rejected)),
-                       "review": next(x.get("review", False) for x in order if x["id"] == qid)})
-        results.append(result)
-    fresh_rows, _ = session_evidence(assignment)
-    fresh_reviews = retry_sheets(lambda: sheet("Đánh giá ngoài đáp án").get_all_records(default_blank="", numericise_ignore=["all"]))
-    if fresh_rows != rows or [r for r in fresh_reviews if norm(r.get("Session ID")) == sid and norm(r.get("Kiến thức ngoài đáp án"))] != related:
-        raise RuntimeError("Dữ liệu/checkbox vừa thay đổi trong lúc tổng hợp; chưa ghi điểm. Bấm lại để dùng bản mới.")
-    # All checkbox conflicts validated before the first result write. Re-running recalculates from L.
-    return commit_results(sid, norm(assignment["Học viên"]), int(assignment["Ngày"]), order, results, students)
 
 
 TRAINER_CC = "daotao.sanpham@gmail.com"
@@ -1008,7 +867,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                   if norm(r.get("Question ID")) not in review_ids and not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
     lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
              f"Học viên: {student}", f"Đại lý: {dealer}", f"Điểm: {earned:g}/{maximum:g}", "",
-             "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.", ""]
+             "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu chưa đạt (điểm không quá 70%), đối chiếu đáp án Trainer để làm tốt hơn.", ""]
     if repeat_alerts:
         lines.extend(["", "KIẾN THỨC CẦN ƯU TIÊN ÔN TẬP"])
         for alert in repeat_alerts:
@@ -1100,7 +959,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
         '</div>'
         '<div style="padding:16px;background:#eaf2fc;border-radius:8px;margin:16px 0;line-height:1.6">'
         '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
-        'các câu dưới 50%, đối chiếu đáp án Trainer để làm tốt hơn.</div>'
+        'các câu chưa đạt (điểm không quá 70%), đối chiếu đáp án Trainer để làm tốt hơn.</div>'
         + review_html + "".join(sections) + '</div></body></html>'
     )
     message = EmailMessage()
@@ -1348,7 +1207,9 @@ except Exception as exc:
     if status == 429:
         st.warning("Google Sheets đang giới hạn lượt truy cập. Chờ khoảng một phút rồi bấm Thử tải lại; tránh tải lại liên tục.")
     else:
-        st.error("Không thể tải dữ liệu Google Sheets. Vui lòng thử lại sau.")
+        st.error(f"Không thể tải dữ liệu Google Sheets: {type(exc).__name__}: {exc}")
+    with st.expander("Chi tiết lỗi để kiểm tra"):
+        st.code(str(exc))
     if st.button("Thử tải lại dữ liệu"):
         st.rerun()
     st.stop()
@@ -1591,67 +1452,45 @@ if mode.startswith("Trainer"):
         st.caption("Agent chỉ đề xuất ngày; Trainer xác nhận và quyết định thời điểm mở/đóng. Không tự chấm hoặc gửi báo cáo.")
         st.stop()
     if mode == "Trainer – Chấm bài":
-        st.subheader(f"Chấm bài – Ngày {selected_day}")
-        st.caption("1. Phân loại câu trả lời → 2. Trainer duyệt ý ngoài đáp án → 3. Tổng hợp điểm. Không tự gửi kết quả.")
-        batch_key = f"grading_v2:{selected_day}"
+        st.subheader(f"Chấm điểm – Ngày {selected_day}")
+        st.caption("Trainer chỉ cần bấm Chấm điểm. Agent sẽ đọc toàn bộ câu trả lời, áp dụng Quy tắc đánh giá mới nhất và tự ghi điểm, nhận xét, ý đúng, ý thiếu, ý sai và ý ngoài đáp án. Không còn bước Phân loại hay Tổng hợp riêng.")
+        batch_key = f"grading_agent:{selected_day}"
         batch = st.session_state.get(batch_key)
         if batch is None:
             submitted = [r for r in records("Bài kiểm tra")
                          if norm(r.get("Ngày")) == str(selected_day)
-                         and norm(r.get("Trạng thái")) in ("Chờ chấm", "Đã phân loại", "Hoàn thành")]
-            redo = st.checkbox("Bao gồm bài đã chấm theo cách cũ (lưu bản sao trước khi phân loại)")
+                         and norm(r.get("Trạng thái")) in ("Chờ chấm", "Đã chấm", "Hoàn thành")]
+            redo = st.checkbox("Chấm lại bài đã có kết quả bằng phiên bản hướng dẫn mới")
             pending = [r for r in submitted if norm(r.get("Trạng thái")) == "Chờ chấm"
-                       or (redo and norm(r.get("Trạng thái")) == "Hoàn thành")]
-            finalized_sids = {norm(r.get("Session ID")) for r in records("Câu trả lời") if r.get("Tổng điểm") not in ("", None) and norm(r.get("Trạng thái kiểm duyệt")) == "Finalized v2"}
-            classified = [r for r in submitted if norm(r.get("Trạng thái")) == "Đã phân loại"
-                          or (norm(r.get("Trạng thái")) == "Hoàn thành" and norm(r.get("Session ID")) in finalized_sids)]
-            st.metric("Bài chờ phân loại", len(pending))
-            st.metric("Bài có thể tổng hợp / tính lại", len(classified))
-            left, right = st.columns(2)
-            action = None
-            if left.button("Phân loại câu trả lời", type="primary", disabled=not pending):
-                action, queue = "classify", pending
-            if right.button("Tổng hợp điểm", disabled=not classified):
-                action, queue = "finalize", classified
-            st.link_button("Mở sheet Đánh giá ngoài đáp án", "https://docs.google.com/spreadsheets/d/" + SHEET_ID + "/edit#gid=2026110601")
-            st.caption("Đúng +10%; Sai −5% điểm tối đa/câu; không tích = trung hòa. Tích cả hai sẽ chặn tổng hợp. Điểm có thể vượt 100%.")
-            if action:
-                try:
-                    validate_v2_schema()
-                    invalidate_records("Question Bank - L1", "Question Bank - L2/3/4", "Quy tắc đánh giá", "Câu trả lời", "Bài kiểm tra", "Lượt đánh giá")
-                    bank = question_bank()
-                    if action == "classify":
-                        backup = "Backup_truoc_phan_loai_" + datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
-                        book().duplicate_sheet(sheet("Câu trả lời").id, new_sheet_name=backup)
-                    st.session_state[batch_key] = {"action": action, "queue": queue, "index": 0, "successes": [], "failures": []}
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                       or (redo and norm(r.get("Trạng thái")) in ("Đã chấm", "Hoàn thành"))]
+            st.metric("Bài chờ chấm", len(pending))
+            st.caption("Sau khi Agent chấm xong, Trainer kiểm tra trực tiếp trong tab Câu trả lời rồi dùng mục Duyệt & gửi tất cả.")
+            if st.button("Chấm điểm", type="primary", disabled=not pending):
+                invalidate_records("Question Bank - L1", "Question Bank - L2/3/4", "Quy tắc đánh giá", "Câu trả lời", "Bài kiểm tra", "Lượt đánh giá")
+                st.session_state[batch_key] = {"action": "grade", "queue": pending, "index": 0, "successes": [], "failures": []}
+                st.rerun()
         else:
             total, index = len(batch["queue"]), batch["index"]
-            st.progress(index / total if total else 1.0, text=f"Đã xử lý {index}/{total} bài")
+            st.progress(index / total if total else 1.0, text=f"Đã chấm {index}/{total} bài")
             if index < total:
                 item = batch["queue"][index]
-                st.info(f"Đang xử lý: {norm(item.get('Học viên'))}")
+                st.info(f"Đang chấm: {norm(item.get('Học viên'))}")
                 try:
-                    if batch["action"] == "classify":
-                        classify_session(item, question_bank())
-                    else:
-                        finalize_session(item, bank, students)
+                    grade_pending_session(item, question_bank(), students)
                     batch["successes"].append(norm(item.get("Học viên")))
                 except Exception as exc:
                     batch["failures"].append((norm(item.get("Học viên")), str(exc)))
                 batch["index"] += 1
                 invalidate_records()
                 st.rerun()
-            st.success(f"Đã xử lý thành công {len(batch['successes'])}/{total} bài.")
+            st.success(f"Đã chấm thành công {len(batch['successes'])}/{total} bài.")
             for name, error in batch["failures"]:
                 st.error(f"{name}: {error}")
-            if st.button("Đóng kết quả xử lý"):
+            if st.button("Đóng kết quả chấm"):
                 del st.session_state[batch_key]
                 invalidate_records()
                 st.rerun()
-            st.caption("Giữ trang mở đến khi hoàn tất. Kết quả chỉ công bố khi Trainer duyệt gửi.")
+            st.caption("Giữ trang mở đến khi hoàn tất. Trainer vẫn kiểm tra nhận xét và điểm trước khi gửi email.")
         st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
@@ -1749,10 +1588,12 @@ if mode.startswith("Trainer"):
             sent = all(norm(r.get("Trạng thái gửi email")).startswith("Đã gửi") for _, r in batch)
             st.write(f"**{name}** · {len(batch)} câu · {email or 'CHƯA CÓ EMAIL'} · {'Đã gửi' if sent else 'Chưa gửi'}")
             if not sent:
-                if any(norm(r.get("Trạng thái kiểm duyệt")) == "Classified v2" for _, r in batch):
-                    st.warning(f"{name}: cần Tổng hợp điểm trước khi duyệt gửi.")
-                else:
+                if all(norm(r.get("Trạng thái kiểm duyệt")).startswith("Agent graded") or
+                       norm(r.get("Trạng thái kiểm duyệt")).casefold() == "trainer approved"
+                       for _, r in batch):
                     pending.append((name, email, batch))
+                else:
+                    st.warning(f"{name}: Agent chưa chấm đủ các câu.")
         st.caption(f"{len(batches)} học viên đã nộp · {len(pending)} học viên chưa nhận email.")
         missing = [name for name, email, _ in pending if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)]
         if missing:
@@ -1817,7 +1658,7 @@ st.subheader(f"Bài đánh giá – Ngày {selected_day}")
 key = f"exam_v6:{student}:{selected_day}"
 if key not in st.session_state:
     existing = assignment_row(student, selected_day, assignments)
-    if existing and norm(existing.get("Trạng thái")) in ("Chờ chấm", "Đã phân loại", "Hoàn thành"):
+    if existing and norm(existing.get("Trạng thái")) in ("Chờ chấm", "Đã chấm", "Đã phân loại", "Hoàn thành"):
         sid = norm(existing.get("Session ID"))
         order = json.loads(existing.get("Danh sách câu JSON") or "[]")
         completed = {norm(x.get("Question ID")): x for x in history if norm(x.get("Session ID")) == sid}
