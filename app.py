@@ -162,7 +162,23 @@ def sheet(name):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def records(name):
-    return sheet(name).get_all_records(default_blank="", numericise_ignore=["all"])
+    """Read table rows without treating unused trailing grid columns as headers."""
+    values = sheet(name).get_all_values(value_render_option="UNFORMATTED_VALUE")
+    if not values:
+        return []
+    headers = [str(value or "").strip() for value in values[0]]
+    while headers and not headers[-1]:
+        headers.pop()
+    if not headers or any(not header for header in headers):
+        raise RuntimeError(f"Tab {name} có ô trống trong hàng tiêu đề; kiểm tra hàng 1.")
+    if len(set(headers)) != len(headers):
+        raise RuntimeError(f"Tab {name} có tiêu đề cột trùng nhau; kiểm tra hàng 1.")
+    result = []
+    for raw in values[1:]:
+        row = list(raw[:len(headers)]) + [""] * max(0, len(headers) - len(raw))
+        if any(str(value or "").strip() for value in row):
+            result.append(dict(zip(headers, row[:len(headers)])))
+    return result
 
 
 def invalidate_records(*names):
