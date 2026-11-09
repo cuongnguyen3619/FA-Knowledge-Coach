@@ -1535,8 +1535,30 @@ if mode.startswith("Trainer"):
                 except Exception as exc:
                     st.error(f"Chấm bài test chưa thành công: {exc}")
         else:
-            st.success("Đã hoàn thành bài kiểm tra. Kết quả sẽ được thông báo sau.")
-            st.caption("Chế độ Trainer test: không gửi email, không ghi dữ liệu vào Google Sheets.")
+            results = test.get("results") or []
+            result_by_id = {norm(r.get("Question ID")): r for r in results}
+            total = sum(float(r.get("Điểm đạt") or 0) for r in results)
+            maximum = sum(float(r.get("Điểm tối đa") or 0) for r in results)
+            st.success("Đã chấm xong bài test.")
+            st.metric("Tổng điểm", f"{total:g}/{maximum:g}", f"{(total / maximum):.0%}" if maximum else None)
+            st.caption("Chế độ Trainer test: không ghi dữ liệu vào Google Sheets và không gửi email.")
+            for idx, item in enumerate(test["order"], 1):
+                q = bank[item["id"]]
+                result = result_by_id.get(item["id"], {})
+                st.markdown(f"### Câu {idx}/{len(test["order"])}")
+                panel("Câu hỏi", norm(q.get("Câu hỏi")), "question")
+                panel("Câu trả lời", norm(result.get("Câu trả lời") or (test.get("responses") or {}).get(item["id"])), "answer")
+                score = float(result.get("Điểm đạt") or 0)
+                max_points = float(result.get("Điểm tối đa") or POINTS[level(q)])
+                st.write(f"**Điểm:** {score:g}/{max_points:g}")
+                if level(q) == 1:
+                    panel("Kết quả", "ĐÚNG" if score == max_points else "SAI", "feedback")
+                else:
+                    feedback = norm(result.get("Đánh giá từ Agent") or result.get("Đánh giá từ Agent tham khảo đáp án gợi ý"))
+                    panel("Nhận xét của Agent", feedback or "Chưa có nhận xét.", "feedback")
+                outside = norm(result.get("Nội dung ngoài đáp án"))
+                if outside:
+                    panel("Ý ngoài đáp án", outside, "feedback")
             if st.button("Làm bài test mới"):
                 del st.session_state[test_key]
                 st.rerun()
