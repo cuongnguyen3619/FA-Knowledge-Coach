@@ -338,14 +338,14 @@ def grade_open(question, answer, max_points):
             {"role": "system", "content": (
                 "Bạn là giám khảo Ford Academy. Căn cứ chấm gồm câu hỏi, đáp án tham khảo đã được Trainer duyệt "
                 "và trainer_rules là phiên bản mới nhất của tab Quy tắc đánh giá trong Google Sheet. "
-                "Tạm thời KHÔNG sử dụng trường Rubric riêng của câu hỏi, kể cả khi trường đó có dữ liệu. "
+                "Nếu trường Rubric riêng của câu hỏi có nội dung, bắt buộc đọc và áp dụng; nếu Rubric trống thì bỏ qua Rubric và không tự tạo tiêu chí từ Rubric. "
                 "Tuân thủ trainer_rules: hiểu ý theo ngữ cảnh; chấp nhận từ đồng nghĩa, viết tắt, lỗi chính tả nhỏ "
                 "và cách diễn đạt tương đương; không thêm kiến thức học viên chưa thể hiện; không suy đoán khi câu trả lời mơ hồ; "
-                "chấm theo từng ý, cho phép ghi nhận đúng một phần và không tính trùng một ý nhiều lần. "
-                "Không chấm theo keyword cứng và không yêu cầu học viên lặp nguyên văn. "
+                "chấm theo từng ý hoặc mệnh đề độc lập; không dùng nhãn “đúng một phần”; phải tách riêng phần đúng và phần sai, không tính trùng một ý nhiều lần. "
+                "Không chấm theo keyword cứng và không yêu cầu học viên lặp nguyên văn. Nếu Rubric của câu Đèn Matrix xác định đúng là 9 chip LED thì câu trả lời nói 12 chip LED phải ghi vào “Ý sai/không phù hợp”, không được ghi là ý hay hoặc cộng điểm; nếu cùng câu có mô tả đúng cơ chế thì tách riêng và vẫn ghi nhận phần đúng. Nếu Rubric không nêu thông số thì không tự suy đoán. "
                 "Agent phải tự chấm trọn gói, gồm ý đúng, ý thiếu, ý sai rõ ràng và ý ngoài đáp án; không yêu cầu bước phân loại thủ công. "
                 "ratio là điểm cuối trong khoảng 0..1, không vượt điểm tối đa. Ý ngoài đáp án đúng và liên quan có thể được tính trong điểm cuối "
-                "khi có căn cứ theo trainer_rules; ý ngoài đáp án mơ hồ thì không tính điểm; ý sai rõ ràng chỉ ghi nhận khi đủ căn cứ. "
+                "khi Rubric hoặc trainer_rules cho phép và có căn cứ rõ ràng; ý ngoài đáp án mơ hồ thì không tính điểm; ý trái Rubric hoặc thông số được Rubric xác định là sai rõ ràng, không được chuyển thành ý hay hoặc điểm cộng. "
                 "Không tự thêm kiến thức hoặc tự suy đoán. Nếu không chắc chắn, needs_review=true. "
                 "Trả JSON: ratio (0..1), correct_points (array strings), outside_correct_points (array strings), "
                 "outside_wrong_points (array strings), outside_uncertain_points (array strings), missing_points (array strings), "
@@ -355,8 +355,9 @@ def grade_open(question, answer, max_points):
             )},
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
+                "rubric": question.get("Rubric", ""),
                 "trainer_rules": question.get("_trainer_rules", ""),
-                "stage_rules": "Agent chấm trọn gói theo trainer_rules mới nhất. Tạm thời không sử dụng Rubric riêng của câu hỏi. Cho phép đúng một phần, chấp nhận diễn đạt tương đương, không suy đoán ý mơ hồ, không chấm keyword cứng và không yêu cầu bước phân loại thủ công. Điểm cuối không vượt điểm tối đa và ngưỡng Đạt là từ 70% trở lên.",
+                "stage_rules": "Agent chấm trọn gói theo trainer_rules mới nhất. Nếu Rubric có nội dung thì bắt buộc áp dụng; nếu Rubric trống thì bỏ qua. Tách từng ý hoặc mệnh đề độc lập, không dùng nhãn đúng một phần; thông số trái Rubric là sai rõ ràng. Với câu Đèn Matrix, 9 chip LED là đúng theo Rubric và 12 chip LED là sai/không phù hợp, không cộng điểm. Chấp nhận diễn đạt tương đương, không suy đoán ý mơ hồ, không chấm keyword cứng và không yêu cầu bước phân loại thủ công. Điểm cuối không vượt điểm tối đa và ngưỡng Đạt là từ 70% trở lên.",
                 "answer": answer
             }, ensure_ascii=False)}
         ])
