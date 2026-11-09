@@ -907,14 +907,15 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             answer = describe_keys(answer)
             reference = describe_keys(reference)
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
-                          f"Trả lời: {answer}",
+                          f"Câu trả lời của bạn: {answer}",
                           f"Đáp án: {reference}", ""])
         else:
             fb = report_feedback(effective_comment(r))
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
-                          f"Trả lời: {answer}",
+                          f"Câu trả lời của bạn: {answer}",
                           f"Điểm: {report_number(effective_score(r)):g}/{report_number(r.get('Điểm tối đa')):g}",
-                          f"Nhận xét: {norm(fb.get('feedback'))}", ""])
+                          f"Nhận xét: {norm(fb.get('feedback'))}",
+                          f"Đáp án gợi ý: {reference}", ""])
     # HTML email: readable on Gmail/mobile; text/plain remains as fallback.
     from html import escape as html_escape
     def h(value):
@@ -932,7 +933,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                 return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
             answer, reference = expand(answer), expand(reference)
         detail = (
-            f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">Trả lời:</span> {h(answer)}</div>'
+            f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">Câu trả lời của bạn:</span> {h(answer)}</div>'
         )
         if not is_l1:
             feedback = norm(report_feedback(effective_comment(r)).get("feedback"))
@@ -942,6 +943,12 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                 f'<div style="padding:14px 16px;background:#f0f7fc;border-left:3px solid #1473a5;'
                 f'border-radius:5px;margin:14px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
                 f'<div style="margin-top:8px;line-height:1.65;color:#263445">{h(feedback)}</div></div>'
+            )
+        if not is_l1:
+            detail += (
+                f'<div style="padding:12px 14px;background:#fff8e8;border-left:3px solid #ae7414;'
+                f'border-radius:5px;margin:14px 0"><strong style="color:#7c4a03">Đáp án gợi ý</strong>'
+                f'<div style="margin-top:8px;line-height:1.65;color:#4c3410">{h(reference)}</div></div>'
             )
         if is_l1:
             detail += (f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">'
