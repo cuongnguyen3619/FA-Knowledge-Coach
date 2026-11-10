@@ -410,7 +410,7 @@ def grade_open(question, answer, max_points):
                 "outside_wrong_points (array strings), outside_uncertain_points (array strings), missing_points (array strings), "
                 "incorrect_points (array strings), feedback (string), needs_review (boolean). "
                 "Mỗi ý là một phần tử riêng, giữ nguyên điều kiện và ngữ cảnh, không lặp ý. "
-                "feedback phải theo đúng 4 mục ngắn gọn, theo đúng thứ tự: Các ý đã trình bày đúng; Các ý có thể bổ sung; Ý hay được cộng thêm điểm; Ý sai/không phù hợp. Mục Các ý có thể bổ sung phải nêu ý còn thiếu cụ thể, để hệ thống diễn đạt theo mẫu “Tuy nhiên, bạn chưa đề cập: ... Bạn có thể thêm ý này để phần tư vấn thuyết phục hơn.” Chỉ liệt kê ý ngắn gọn, không lan man; mục nào không có ý thì ghi Không có. Không nhắc đến đáp án tham khảo, đáp án mẫu, Rubric, trainer_rules hoặc cách hệ thống đối chiếu trong feedback; hãy viết như nhận xét trực tiếp dành cho học viên."
+                "feedback phải ngắn gọn và chỉ hiển thị mục có nội dung, theo đúng thứ tự: Các ý đã trình bày đúng; Các ý có thể bổ sung; Ý hay được cộng thêm điểm; Ý sai/không phù hợp. Bỏ hẳn mục không có nội dung, không ghi “Không có”, không dùng câu lặp “Tuy nhiên, bạn chưa đề cập…” hoặc “Bạn có thể thêm ý này…”. Mỗi ý một dòng, diễn đạt ngắn gọn, không lan man. Ý học viên đã nêu đúng đưa vào mục Các ý đã trình bày đúng; ý có trong đáp án/Rubric nhưng học viên chưa nêu đưa vào mục Các ý có thể bổ sung; không chuyển đổi hai mục. Không nhắc đến đáp án tham khảo, đáp án mẫu, Rubric, trainer_rules hoặc cách hệ thống đối chiếu trong feedback; hãy viết như nhận xét trực tiếp dành cho học viên.
             )},
             {"role": "user", "content": json.dumps({
                 "question": question.get("Câu hỏi"), "reference": question.get("Đáp án tham khảo"),
@@ -1090,7 +1090,7 @@ def clean_feedback_language(value):
 
 
 def format_agent_feedback(feedback):
-    """Render concise learner feedback in the four agreed sections."""
+    """Render concise learner feedback and omit empty sections."""
     if not isinstance(feedback, dict):
         return clean_feedback_language(feedback)
     groups = [
@@ -1112,15 +1112,11 @@ def format_agent_feedback(feedback):
                 item = clean_feedback_language(value).lstrip("•- ").strip()
                 if item and item not in items:
                     items.append(item)
+        if not items:
+            continue
         lines.append(title + ":")
-        if items:
-            for item in items[:5]:
-                if title == "Các ý có thể bổ sung":
-                    lines.append("- Tuy nhiên, bạn chưa đề cập: " + item + ". Bạn có thể thêm ý này để phần tư vấn thuyết phục hơn.")
-                else:
-                    lines.append("- " + item)
-        else:
-            lines.append("- Không có.")
+        for item in items[:5]:
+            lines.append("- " + item)
     return "\n".join(lines)
 
 def report_feedback(value):
