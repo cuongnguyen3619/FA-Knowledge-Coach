@@ -1263,6 +1263,73 @@ def course_window():
     return now, active, sorted(schedule, key=lambda item: item[0])
 
 
+def parse_course_date(value, today=None):
+    """Parse the date formats used in Khóa học without deprecated day-month parsing."""
+    today = today or datetime.now(TZ).date()
+    raw = norm(value)
+    if not raw:
+        return None
+    for fmt in ("%d-%b-%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            pass
+    try:
+        return datetime.strptime(f"{raw}-{today.year}", "%d-%b-%Y").date()
+    except ValueError:
+        return None
+
+
+def sheet_timestamp_date(value):
+    """Convert an ISO or date-only Sheet value to a local calendar date."""
+    raw = norm(value)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone(TZ)
+        return parsed.date()
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%b-%Y", "%d-%b"):
+        try:
+            text = raw if fmt != "%d-%b" else f"{raw}-{datetime.now(TZ).year}"
+            return datetime.strptime(text, fmt if fmt != "%d-%b" else "%d-%b-%Y").date()
+        except ValueError:
+            pass
+    return None
+
+
+def course_date_range():
+    """Return the inclusive start/end dates configured in Khóa học."""
+    today = datetime.now(TZ).date()
+    dates = []
+    for row in cached_course_values()[1:]:
+        if len(row) > 1:
+            parsed = parse_course_date(row[1], today)
+            if parsed:
+                dates.append(parsed)
+    return (min(dates), max(dates)) if dates else (None, None)
+
+
+def within_course_period(value, start_date, end_date):
+    parsed = sheet_timestamp_date(value)
+    return bool(parsed and start_date and end_date and start_date <= parsed <= end_date)
+
+
+def course_session_ids(assignments, start_date, end_date, selected_day=None):
+    result = set()
+    for row in assignments:
+        if selected_day is not None and norm(row.get("Ngày")) != str(selected_day):
+            continue
+        started = norm(row.get("Bắt đầu")) or norm(row.get("Cập nhật lúc"))
+        if within_course_period(started, start_date, end_date):
+            sid = norm(row.get("Session ID"))
+            if sid:
+                result.add(sid)
+    return result
+
 def suggested_training_day():
     """Suggest the course day from the date column, without opening an exam."""
     today = datetime.now(TZ).date()
@@ -1275,9 +1342,8 @@ def suggested_training_day():
             match = re.search(r"(\d+)", norm(row[0]))
             if not match:
                 continue
-            try:
-                d = datetime.strptime(norm(row[1]), "%d-%b").replace(year=today.year).date()
-            except ValueError:
+            d = parse_course_date(row[1], today)
+            if d is None:
                 continue
             day_number = int(match.group(1))
             if 1 <= day_number <= 4:
@@ -1594,9 +1660,13 @@ if mode.startswith("Trainer"):
         batch_key = f"grading_agent:{selected_day}"
         batch = st.session_state.get(batch_key)
         if batch is None:
+            course_start, course_end = course_date_range()
             pending = [r for r in records("Bài kiểm tra")
                        if norm(r.get("Ngày")) == str(selected_day)
-                       and norm(r.get("Trạng thái")) == "Chờ chấm"]
+                       and norm(r.get("Trạng thái")) == "Chờ chấm"
+                       and within_course_period(
+                           norm(r.get("Bắt đầu")) or norm(r.get("Cập nhật lúc")),
+                           course_start, course_end)]
             st.metric("Bài chờ chấm", len(pending))
             if st.button("Chấm điểm", type="primary", disabled=not pending):
                 invalidate_records("Question Bank - L1", "Question Bank - L2/3/4", "Quy tắc đánh giá", "Câu trả lời", "Bài kiểm tra", "Lượt đánh giá")
@@ -1637,16 +1707,25 @@ if mode.startswith("Trainer"):
         if st.button("Làm mới báo cáo"):
             invalidate_records()
             st.rerun()
-        history = retry_sheets(lambda: records("Câu trả lời"))
+        course_start, course_end = course_date_range()
+        if not course_start or not course_end:
+            st.error("Chưa xác định được khoảng ngày khóa học trong tab Khóa học.")
+            st.stop()
+        current_sessions = course_session_ids(assignments, course_start, course_end)
+        history = [r for r in retry_sheets(lambda: records("Câu trả lời"))
+                   if norm(r.get("Session ID")) in current_sessions]
+        current_evaluations = [r for r in records("Lượt đánh giá")
+                               if norm(r.get("Session ID")) in current_sessions]
         latest = {}
-        for r in records("Lượt đánh giá"):
+        for r in current_evaluations:
             if norm(r.get("Ngày đánh giá")) == str(selected_day):
                 latest[norm(r.get("Họ và tên"))] = r
         rows = list(latest.values())
         completed = [r for r in rows if norm(r.get("Trạng thái")).lower() in ("completed", "hoàn thành")]
         a, b, c = st.columns(3)
-        a.metric("Học viên", len(names))
-        b.metric("Hoàn thành", f"{len(completed)}/{len(names)}")
+        visible_students = {norm(r.get("Họ và tên")) for r in current_evaluations if norm(r.get("Họ và tên"))}
+        a.metric("Học viên", len(visible_students))
+        b.metric("Hoàn thành", f"{len(completed)}/{len(visible_students)}")
         scores = [report_number(r.get("Tỷ lệ (%)")) for r in completed]
         c.metric("Điểm TB", f"{sum(scores)/len(scores):.1f}%" if scores else "—")
         for lev in (2, 3, 4):
@@ -1659,7 +1738,7 @@ if mode.startswith("Trainer"):
         st.divider()
         st.subheader("Theo dõi tiến bộ học viên")
         st.caption("So sánh lượt hoàn thành mới nhất của mỗi ngày đào tạo. Chênh lệch điểm tính bằng điểm phần trăm; các ngày có bộ câu hỏi khác nhau nên đây là chỉ báo tham khảo.")
-        progress = learner_progress_data(records("Lượt đánh giá"), history, students)
+        progress = learner_progress_data(current_evaluations, history, students)
         if progress:
             a, b, c, d = st.columns(4)
             a.metric("Có từ 2 ngày", sum(r["Số ngày đã học"] >= 2 for r in progress))
@@ -1694,7 +1773,11 @@ if mode.startswith("Trainer"):
             st.stop()
         entries = [(i, dict(zip(headers, row + [""] * (len(headers)-len(row)))))
                    for i, row in enumerate(values[1:], 2)]
-        daily = [(i, r) for i, r in entries if norm(r.get("Ngày đánh giá")) == str(selected_day)]
+        course_start, course_end = course_date_range()
+        current_sessions = course_session_ids(assignments, course_start, course_end, selected_day)
+        daily = [(i, r) for i, r in entries
+                 if norm(r.get("Ngày đánh giá")) == str(selected_day)
+                 and norm(r.get("Session ID")) in current_sessions]
         # One report per student: use the last recorded session for that day.
         latest_sessions = {}
         for i, r in daily:
@@ -1764,6 +1847,9 @@ if mode.startswith("Trainer"):
         if st.button("Làm mới cảnh báo"):
             invalidate_records()
             st.rerun()
+        course_start, course_end = course_date_range()
+        current_sessions = course_session_ids(assignments, course_start, course_end)
+        history = [r for r in history if norm(r.get("Session ID")) in current_sessions]
         warnings = repeated_unpassed_questions(history, students)
         a, b, c = st.columns(3)
         a.metric("Học viên cần hỗ trợ", len({r["Học viên"] for r in warnings}))
