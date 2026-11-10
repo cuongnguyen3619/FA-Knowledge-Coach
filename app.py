@@ -955,67 +955,58 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             lines.append(f'- {alert["Câu hỏi"]} ({alert["Số lần chưa đạt"]} lần chưa đạt; điểm: {alert["Điểm từng lần"]})')
         lines.append("")
     for i, r in enumerate(rows, 1):
-        qid = norm(r.get("Question ID"))
-        q = bank.get(qid, {})
+        q = bank.get(norm(r.get("Question ID")), {})
         is_l1 = norm(r.get("Level")) == "1"
         answer = norm(r.get("Nội dung trả lời học viên"))
-        reference = norm(r.get("Đáp án chuẩn đã duyệt"))
         if is_l1:
             choices = q.get("_choices", {})
             def describe_keys(raw):
                 keys = re.findall(r"[A-D]", raw.upper())
                 return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
             answer = describe_keys(answer)
-            reference = describe_keys(reference)
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
-                          f"Câu trả lời của bạn: {answer}",
-                          f"Đáp án: {reference}", ""])
+                          f"Câu trả lời của bạn: {answer}", ""])
         else:
             fb = report_feedback(effective_comment(r))
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
                           f"Câu trả lời của bạn: {answer}",
                           f"Điểm: {report_number(effective_score(r)):g}/{report_number(r.get('Điểm tối đa')):g}",
-                          f"Nhận xét: {norm(fb.get('feedback'))}",
-                          f"Đáp án gợi ý: {reference}", ""])
+                          f"Nhận xét: {norm(fb.get('feedback'))}", ""])
+
     # HTML email: readable on Gmail/mobile; text/plain remains as fallback.
     from html import escape as html_escape
     def h(value):
-        return html_escape(str(value or "")).replace("\\n", "<br>")
+        return (html_escape(str(value or ""))
+                .replace("\r\n", "<br>")
+                .replace("\r", "<br>")
+                .replace("\n", "<br>"))
     sections = []
     for i, r in enumerate(rows, 1):
         q = bank.get(norm(r.get("Question ID")), {})
         is_l1 = norm(r.get("Level")) == "1"
         answer = norm(r.get("Nội dung trả lời học viên"))
-        reference = norm(r.get("Đáp án chuẩn đã duyệt"))
         if is_l1:
             choices = q.get("_choices", {})
             def expand(raw):
                 keys = re.findall(r"[A-D]", raw.upper())
                 return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
-            answer, reference = expand(answer), expand(reference)
+            answer = expand(answer)
         detail = (
-            f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">Câu trả lời của bạn:</span> {h(answer)}</div>'
+            f'<div style="margin:12px 0;line-height:1.65">'
+            f'<span style="font-weight:600;color:#475569">Câu trả lời của bạn:</span><br>{h(answer)}</div>'
         )
         if not is_l1:
             feedback = norm(report_feedback(effective_comment(r)).get("feedback"))
             detail += (
-                f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">Điểm:</span> '
+                f'<div style="margin:14px 0;line-height:1.65">'
+                f'<span style="font-weight:600;color:#475569">Điểm:</span> '
                 f'{report_number(effective_score(r)):g}/{report_number(r.get("Điểm tối đa")):g}</div>'
                 f'<div style="padding:14px 16px;background:#f0f7fc;border-left:3px solid #1473a5;'
-                f'border-radius:5px;margin:14px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
-                f'<div style="margin-top:8px;line-height:1.65;color:#263445">{h(feedback)}</div></div>'
+                f'border-radius:5px;margin:16px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
+                f'<div style="margin-top:10px;line-height:1.8;color:#263445">{h(feedback)}</div></div>'
             )
-        if not is_l1:
-            detail += (
-                f'<div style="padding:12px 14px;background:#fff8e8;border-left:3px solid #ae7414;'
-                f'border-radius:5px;margin:14px 0"><strong style="color:#7c4a03">Đáp án gợi ý</strong>'
-                f'<div style="margin-top:8px;line-height:1.65;color:#4c3410">{h(reference)}</div></div>'
-            )
-        if is_l1:
-            detail += (f'<div style="margin:12px 0"><span style="font-weight:600;color:#475569">'
-                       f'Đáp án:</span> {h(reference)}</div>')
         sections.append(
-            f'<div style="border:1px solid #e2e8f0;border-radius:10px;padding:20px;'
+            f'<div style="border:1px solid #e2e8f0;border-radius:10px;padding:18px 16px;'
             f'margin:18px 0;background:#ffffff">'
             f'<h3 style="margin:0 0 14px;color:#123b70;font-size:17px;line-height:1.45">'
             f'Câu {i}. {h(r.get("Câu hỏi"))}</h3>{detail}</div>'
@@ -1035,6 +1026,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             '<p>Những câu hỏi đã trả lời nhiều lần nhưng lần gần nhất vẫn chưa đạt:</p>'
             '<ol style="padding-left:20px;margin:8px 0">' + review_items + '</ol></div>'
         )
+
     html_body = (
         '<html><body style="margin:0;padding:24px 12px;background:#f5f7fb;'
         'font-family:Arial,Helvetica,sans-serif;color:#1e293b">'
@@ -1090,7 +1082,7 @@ def clean_feedback_language(value):
 
 
 def format_agent_feedback(feedback):
-    """Render concise learner feedback and omit empty sections."""
+    """Render concise learner feedback with blank lines between sections."""
     if not isinstance(feedback, dict):
         return clean_feedback_language(feedback)
     groups = [
@@ -1099,7 +1091,7 @@ def format_agent_feedback(feedback):
         ("Ý hay được cộng thêm điểm", ("outside_correct_points",)),
         ("Ý sai/không phù hợp", ("incorrect_points", "outside_wrong_points")),
     ]
-    lines = []
+    blocks = []
     for title, fields in groups:
         items = []
         for field in fields:
@@ -1114,12 +1106,12 @@ def format_agent_feedback(feedback):
                     items.append(item)
         if not items:
             continue
-        lines.append(title + ":")
-        for item in items[:5]:
-            lines.append("- " + item)
+        block = [title + ":"]
+        block.extend("- " + item for item in items[:5])
         if title == "Các ý có thể bổ sung":
-            lines.append("Bạn có thể bổ sung các ý trên để phần tư vấn thuyết phục hơn.")
-    return "\n".join(lines)
+            block.append("Bạn có thể bổ sung các ý trên để phần tư vấn thuyết phục hơn.")
+        blocks.append("\n".join(block))
+    return "\n\n".join(blocks)
 
 def report_feedback(value):
     """Support both JSON Agent feedback and Trainer-edited plain text."""
