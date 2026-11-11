@@ -1573,7 +1573,7 @@ if mode.startswith("Trainer"):
                             chosen = [chosen_one] if chosen_one else []
                         responses[item["id"]] = ",".join(sorted(chosen))
                     else:
-                        responses[item["id"]] = st.text_area("Câu trả lời", key=f"{test_key}:{item['id']}", height=120)
+                        responses[item["id"]] = st.text_area("Câu trả lời", key=f"{test_key}:{item['id']}", height=240)
                 submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
             if submitted:
                 if any(not responses.get(item["id"], "").strip() for item in order):
