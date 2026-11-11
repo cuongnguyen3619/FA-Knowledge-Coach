@@ -540,10 +540,7 @@ def show_feedback(q, result):
             panel(title, "\n".join("• " + str(x) for x in feedback[field]), "feedback")
     if feedback.get("feedback"):
         panel("Nhận xét của Agent", feedback["feedback"], "feedback")
-    # Do not expose reference answer unless the learner opens it.
-    with st.expander("▸ Xem đáp án gợi ý", expanded=False):
-        panel("Đáp án tham khảo", norm(q.get("Đáp án tham khảo")) or "Chưa có đáp án tham khảo.", "reference")
-        st.caption("Các cách diễn đạt tương đương vẫn được chấp nhận.")
+    # Learner-facing feedback uses the Trainer's comments and missing points only.
 
 
 # API calls below are limited to initial loading and final batch commit.
