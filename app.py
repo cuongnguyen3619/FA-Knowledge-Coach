@@ -1807,18 +1807,24 @@ if mode.startswith("Trainer"):
                     pending.append((name, email, batch))
                 else:
                     st.warning(f"{name}: Agent chưa chấm đủ các câu.")
-        st.caption(f"{len(batches)} học viên đã nộp · {len(pending)} học viên chưa nhận email.")
-        missing = [name for name, email, _ in pending if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)]
+        valid_email = lambda value: bool(re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", value or ""))
+
+        missing = [name for name, email, _ in pending if not valid_email(email)]
+        ready_to_send = [(name, email, batch) for name, email, batch in pending if valid_email(email)]
         if missing:
-            st.warning("Thiếu email hợp lệ: " + ", ".join(missing) + ". Cập nhật tab Học viên trước khi duyệt.")
-        confirmed = st.checkbox("Tôi đã rà soát nhận xét và xác nhận công bố, gửi email cho tất cả học viên chưa nhận.")
-        if st.button("Approve & gửi kết quả cho tất cả", type="primary",
-                     disabled=not (confirmed and smtp_ready and not missing and bool(pending))):
+            st.warning("Thiếu email hợp lệ: " + ", ".join(missing) + ". Các học viên này sẽ được giữ lại để bổ sung email và gửi sau.")
+        st.caption(
+            f"{len(batches)} học viên đã nộp · {len(pending)} chưa nhận email · "
+            f"{len(ready_to_send)} đủ điều kiện gửi · {len(missing)} chờ bổ sung email."
+        )
+        confirmed = st.checkbox("Tôi đã rà soát nhận xét và xác nhận công bố, gửi email cho các học viên đủ email.")
+        if st.button("Approve & gửi kết quả cho học viên đủ email", type="primary",
+                     disabled=not (confirmed and smtp_ready and bool(ready_to_send))):
             status_col = headers.index("Trạng thái kiểm duyệt") + 1
             email_col = headers.index("Trạng thái gửi email") + 1
             success = []
             failed = []
-            for name, email, batch in pending:
+            for name, email, batch in ready_to_send:
                 rows = [r for _, r in batch]
                 try:
                     # Mark approved before sending. Email status is saved only after SMTP succeeds.
