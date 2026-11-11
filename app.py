@@ -1714,19 +1714,28 @@ if mode.startswith("Trainer"):
                 latest[norm(r.get("Họ và tên"))] = r
         rows = list(latest.values())
         completed = [r for r in rows if norm(r.get("Trạng thái")).lower() in ("completed", "hoàn thành")]
-        a, b, c = st.columns(3)
-        visible_students = {norm(r.get("Họ và tên")) for r in current_evaluations if norm(r.get("Họ và tên"))}
-        a.metric("Học viên", len(visible_students))
-        b.metric("Hoàn thành", f"{len(completed)}/{len(visible_students)}")
+        day_assignments = [r for r in assignments
+                           if norm(r.get("Session ID")) in current_sessions
+                           and norm(r.get("Ngày")) == str(selected_day)]
+        submitted_students = {norm(r.get("Học viên")) for r in day_assignments if norm(r.get("Học viên"))}
+        pending_assignments = [r for r in day_assignments
+                               if norm(r.get("Trạng thái")).casefold() == "chờ chấm"]
+        a, b, c, d = st.columns(4)
+        a.metric("Đã nộp", len(submitted_students))
+        b.metric("Đã chấm", f"{len(completed)}/{len(submitted_students)}")
+        c.metric("Chờ chấm", len(pending_assignments))
         scores = [report_number(r.get("Tỷ lệ (%)")) for r in completed]
-        c.metric("Điểm TB", f"{sum(scores)/len(scores):.1f}%" if scores else "—")
+        d.metric("Điểm TB", f"{sum(scores)/len(scores):.1f}%" if scores else "—")
         for lev in (2, 3, 4):
             vals = [report_number(r.get(f"Điểm Level {lev} (%)")) for r in completed if norm(r.get(f"Điểm Level {lev} (%)"))]
             st.metric(f"Level {lev} TB", f"{sum(vals)/len(vals):.1f}%" if vals else "—")
         if rows:
             st.dataframe([{"Học viên": r.get("Họ và tên"), "Đại lý": r.get("Đại lý"), "Điểm": round(report_number(r.get("Điểm đạt")), 2), "Tỷ lệ (%)": round(report_number(r.get("Tỷ lệ (%)")), 2), "Trạng thái": r.get("Trạng thái"), "Ôn tập": r.get("Nội dung cần ôn tập cho ngày tiếp theo")} for r in rows], hide_index=True, use_container_width=True)
         else:
-            st.info("Chưa có lượt đánh giá.")
+            if pending_assignments:
+                st.info(f"{len(pending_assignments)} bài đã nộp và đang chờ Agent chấm.")
+            else:
+                st.info("Chưa có bài nộp hoặc lượt đánh giá cho ngày này.")
         st.divider()
         st.subheader("Theo dõi tiến bộ học viên")
         st.caption("So sánh lượt hoàn thành mới nhất của mỗi ngày đào tạo. Chênh lệch điểm tính bằng điểm phần trăm; các ngày có bộ câu hỏi khác nhau nên đây là chỉ báo tham khảo.")
