@@ -1807,7 +1807,7 @@ if mode.startswith("Trainer"):
                     pending.append((name, email, batch))
                 else:
                     st.warning(f"{name}: Agent chưa chấm đủ các câu.")
-        valid_email = lambda value: bool(re.fullmatch(r"[^@\\s]+@[^@\\s]+\\.[^@\\s]+", value or ""))
+        valid_email = lambda value: bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value or ""))
 
         missing = [name for name, email, _ in pending if not valid_email(email)]
         ready_to_send = [(name, email, batch) for name, email, batch in pending if valid_email(email)]
