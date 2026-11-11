@@ -1795,15 +1795,22 @@ if mode.startswith("Trainer"):
         if not batches:
             st.info("Chưa có bài nộp nào cho ngày này.")
             st.stop()
+        def grading_ready(value):
+            status = norm(value).casefold()
+            return (
+                status.startswith("agent graded")
+                or status == "trainer approved"
+                or status in {"đã chấm", "đã phân loại", "hoàn thành"}
+                or status.startswith("pro chấm")
+            )
+
         pending = []
         for name, batch in batches.items():
             email = directory.get(name, "")
             sent = all(norm(r.get("Trạng thái gửi email")).startswith("Đã gửi") for _, r in batch)
             st.write(f"**{name}** · {len(batch)} câu · {email or 'CHƯA CÓ EMAIL'} · {'Đã gửi' if sent else 'Chưa gửi'}")
             if not sent:
-                if all(norm(r.get("Trạng thái kiểm duyệt")).startswith("Agent graded") or
-                       norm(r.get("Trạng thái kiểm duyệt")).casefold() == "trainer approved"
-                       for _, r in batch):
+                if all(grading_ready(r.get("Trạng thái kiểm duyệt")) for _, r in batch):
                     pending.append((name, email, batch))
                 else:
                     st.warning(f"{name}: Agent chưa chấm đủ các câu.")
