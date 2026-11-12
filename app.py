@@ -1837,6 +1837,7 @@ if mode.startswith("Trainer"):
                 or status == "trainer approved"
                 or status in {"đã chấm", "đã phân loại", "hoàn thành"}
                 or status.startswith("pro chấm")
+                or status.startswith("fa product coach")
             )
 
         pending = []
