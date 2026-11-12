@@ -1319,6 +1319,29 @@ def course_session_ids(assignments, start_date, end_date, selected_day=None):
                 result.add(sid)
     return result
 
+def submission_status_rows(students, assignments, selected_day, start_date, end_date):
+    """Roster-based submission status, independent of grading summaries."""
+    sessions = course_session_ids(assignments, start_date, end_date, selected_day)
+    submitted = {}
+    submitted_states = {"chờ chấm", "đã chấm", "đã phân loại", "hoàn thành", "completed"}
+    for row in assignments:
+        if (norm(row.get("Session ID")) in sessions
+                and norm(row.get("Ngày")) == str(selected_day)
+                and norm(row.get("Trạng thái")).casefold() in submitted_states):
+            name = norm(row.get("Học viên"))
+            if name:
+                submitted[name] = row
+    directory = {norm(r.get("Họ và tên")): norm(r.get("Đại lý"))
+                 for r in students if norm(r.get("Họ và tên"))}
+    # Retain submitted learners even if the roster was subsequently edited.
+    for name in submitted:
+        directory.setdefault(name, "")
+    return [{"Học viên": name, "Đại lý": dealer,
+             "Nộp bài": "Đã nộp" if name in submitted else "Chưa nộp",
+             "Trạng thái bài": norm(submitted[name].get("Trạng thái")) if name in submitted else "—"}
+            for name, dealer in sorted(directory.items(), key=lambda item: item[0].casefold())]
+
+
 def suggested_training_day():
     """Suggest the course day from the date column, without opening an exam."""
     today = datetime.now(TZ).date()
@@ -1685,22 +1708,46 @@ if mode.startswith("Trainer"):
         st.stop()
     if mode == "Trainer – Dashboard":
         st.subheader(f"Dashboard lớp – Ngày {selected_day}")
-        st.caption("Dữ liệu báo cáo chỉ được tải và tổng hợp khi Trainer yêu cầu.")
-        report_key = f"trainer_report_requested:{selected_day}"
-        if st.button("Tạo báo cáo", type="primary"):
-            invalidate_records()
-            st.session_state[report_key] = True
-        if not st.session_state.get(report_key, False):
-            st.info("Bấm Tạo báo cáo để xem tổng quan lớp và tiến bộ học viên.")
-            st.stop()
-        if st.button("Làm mới báo cáo"):
-            invalidate_records()
+        if st.button("Làm mới danh sách nộp bài"):
+            invalidate_records("Học viên", "Bài kiểm tra")
+            cached_course_values.clear()
             st.rerun()
         course_start, course_end = course_date_range()
         if not course_start or not course_end:
             st.error("Chưa xác định được khoảng ngày khóa học trong tab Khóa học.")
             st.stop()
         current_sessions = course_session_ids(assignments, course_start, course_end)
+        submission_rows = submission_status_rows(
+            students, assignments, selected_day, course_start, course_end)
+        submitted_students = {r["Học viên"] for r in submission_rows if r["Nộp bài"] == "Đã nộp"}
+        st.subheader("Tình hình nộp bài")
+        a, b, c = st.columns(3)
+        a.metric("Tổng học viên", len(submission_rows))
+        b.metric("Đã nộp bài", len(submitted_students))
+        c.metric("Chưa nộp bài", len(submission_rows) - len(submitted_students))
+        submission_filter = st.radio(
+            "Hiển thị học viên", ["Tất cả", "Chưa nộp", "Đã nộp"],
+            horizontal=True, key=f"submission_filter:{selected_day}")
+        visible_submissions = [r for r in submission_rows
+                               if submission_filter == "Tất cả" or r["Nộp bài"] == submission_filter]
+        if visible_submissions:
+            st.dataframe(visible_submissions, hide_index=True, use_container_width=True)
+        else:
+            st.info("Không có học viên trong nhóm này.")
+        st.caption("Đã nộp bao gồm bài chờ chấm và bài đã chấm. Danh sách đối chiếu với tab Học viên; bấm Làm mới danh sách nộp bài để cập nhật.")
+        st.divider()
+        st.caption("Báo cáo điểm và tiến bộ được tải khi Trainer yêu cầu.")
+        report_key = f"trainer_report_requested:{selected_day}"
+        if st.button("Tạo báo cáo", type="primary"):
+            invalidate_records()
+            st.session_state[report_key] = True
+            st.rerun()
+        if not st.session_state.get(report_key, False):
+            st.info("Bấm Tạo báo cáo để xem điểm và tiến bộ học viên.")
+            st.stop()
+        if st.button("Làm mới báo cáo"):
+            invalidate_records()
+            st.rerun()
         history = [r for r in retry_sheets(lambda: records("Câu trả lời"))
                    if norm(r.get("Session ID")) in current_sessions]
         current_evaluations = [r for r in records("Lượt đánh giá")
@@ -1714,7 +1761,6 @@ if mode.startswith("Trainer"):
         day_assignments = [r for r in assignments
                            if norm(r.get("Session ID")) in current_sessions
                            and norm(r.get("Ngày")) == str(selected_day)]
-        submitted_students = {norm(r.get("Học viên")) for r in day_assignments if norm(r.get("Học viên"))}
         pending_assignments = [r for r in day_assignments
                                if norm(r.get("Trạng thái")).casefold() == "chờ chấm"]
         a, b, c, d = st.columns(4)
