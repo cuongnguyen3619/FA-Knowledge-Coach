@@ -1060,7 +1060,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
         f'<h1 style="font-size:20px;margin:0 0 8px;color:white">BÁO CÁO HỌC TẬP - NGÀY {selected_day}</h1>'
         f'<div style="font-size:16px">Học viên: <strong>{h(student)}</strong></div>'
         f'<div style="font-size:15px;margin-top:6px">Đại lý: <strong>{h(dealer)}</strong></div>'
-        f'<div style="font-size:19px;margin-top:10px">Điểm: <strong>{earned:g}/{maximum:g}</strong></div>'
+        f'<div style="font-size:19px;margin-top:10px">Điểm: <strong>{overall_percent}% – {overall_result}</strong></div>'
         '</div>'
         '<div style="padding:10px;background:#eaf2fc;border-radius:8px;margin:10px 0;line-height:1.5">'
         '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
