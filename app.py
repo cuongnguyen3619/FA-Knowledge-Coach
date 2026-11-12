@@ -943,8 +943,10 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                  if norm(r.get("Question ID")) not in review_ids and not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
     maximum = sum(report_number(r.get("Điểm tối đa")) for r in rows
                   if norm(r.get("Question ID")) not in review_ids and not norm(r.get("Loại câu hỏi")).lower().startswith("ôn tập"))
+    overall_percent = score_percent(earned, maximum)
+    overall_result = score_result(earned, maximum)
     lines = [f"BÁO CÁO HỌC TẬP - NGÀY {selected_day}",
-             f"Học viên: {student}", f"Đại lý: {dealer}", f"Điểm: {earned:g}/{maximum:g}", "",
+             f"Học viên: {student}", f"Đại lý: {dealer}", f"Điểm: {overall_percent}% – {overall_result}", "",
              "Khuyến nghị: Xem chi tiết phần nhận xét của Trainer, các câu chưa đạt (điểm dưới 60%), đối chiếu đáp án Trainer để làm tốt hơn.", ""]
     if repeat_alerts:
         lines.extend(["", "KIẾN THỨC CẦN ƯU TIÊN ÔN TẬP"])
@@ -961,13 +963,22 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                 keys = re.findall(r"[A-D]", raw.upper())
                 return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
             answer = describe_keys(answer)
+            expected_keys = set(q.get("_keys", []))
+            selected_keys = set(re.findall(r"[A-D]", norm(r.get("Nội dung trả lời học viên")).upper()))
+            is_correct = bool(expected_keys) and selected_keys == expected_keys
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
-                          f"Câu trả lời của bạn: {answer}", ""])
+                          f"Kết quả: {'Chính xác' if is_correct else 'Chưa chính xác'}",
+                          f"Câu trả lời của bạn: {answer}"])
+            if not is_correct:
+                lines.append(f"Đáp án đúng: {describe_keys(','.join(q.get('_keys', [])))}")
+            lines.append("")
         else:
             fb = report_feedback(effective_comment(r))
+            score = report_number(effective_score(r))
+            maximum_score = report_number(r.get("Điểm tối đa"))
             lines.extend([f"Câu {i}: {norm(r.get('Câu hỏi'))}",
                           f"Câu trả lời của bạn: {answer}",
-                          f"Điểm: {report_number(effective_score(r)):g}/{report_number(r.get('Điểm tối đa')):g}",
+                          f"Điểm: {score_percent(score, maximum_score)}% – {score_result(score, maximum_score)}",
                           f"Nhận xét: {norm(fb.get('feedback'))}", ""])
 
     # HTML email: readable on Gmail/mobile; text/plain remains as fallback.
@@ -987,27 +998,44 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             def expand(raw):
                 keys = re.findall(r"[A-D]", raw.upper())
                 return "; ".join(f"{k}. {choices[k]}" if k in choices else k for k in keys) or raw
+            expected_keys = set(q.get("_keys", []))
+            selected_keys = set(re.findall(r"[A-D]", answer.upper()))
+            is_correct = bool(expected_keys) and selected_keys == expected_keys
+            result_label = "Chính xác" if is_correct else "Chưa chính xác"
             answer = expand(answer)
-        detail = (
-            f'<div style="margin:12px 0;line-height:1.65">'
-            f'<span style="font-weight:600;color:#475569">Câu trả lời của bạn:</span><br>{h(answer)}</div>'
-        )
-        if not is_l1:
+            expected_answer = expand(",".join(q.get("_keys", [])))
+            detail = (
+                f'<div style="margin:8px 0;line-height:1.55">'
+                f'<span style="font-weight:600;color:#475569">Kết quả:</span> {result_label}</div>'
+                f'<div style="margin:8px 0;line-height:1.55">'
+                f'<span style="font-weight:600;color:#475569">Câu trả lời của bạn:</span><br>{h(answer)}</div>'
+            )
+            if not is_correct:
+                detail += (
+                    f'<div style="margin:8px 0;line-height:1.55">'
+                    f'<span style="font-weight:600;color:#475569">Đáp án đúng:</span><br>{h(expected_answer)}</div>'
+                )
+        else:
             feedback = norm(report_feedback(effective_comment(r)).get("feedback"))
-            detail += (
-                f'<div style="margin:14px 0;line-height:1.65">'
+            score = report_number(effective_score(r))
+            maximum_score = report_number(r.get("Điểm tối đa"))
+            detail = (
+                f'<div style="margin:8px 0;line-height:1.55">'
+                f'<span style="font-weight:600;color:#475569">Câu trả lời của bạn:</span><br>{h(answer)}</div>'
+                f'<div style="margin:8px 0;line-height:1.55">'
                 f'<span style="font-weight:600;color:#475569">Điểm:</span> '
-                f'{report_number(effective_score(r)):g}/{report_number(r.get("Điểm tối đa")):g}</div>'
-                f'<div style="padding:14px 16px;background:#f0f7fc;border-left:3px solid #1473a5;'
-                f'border-radius:5px;margin:16px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
-                f'<div style="margin-top:10px;line-height:1.8;color:#263445">{h(feedback)}</div></div>'
+                f'{score_percent(score, maximum_score)}% – {score_result(score, maximum_score)}</div>'
+                f'<div style="padding:10px 10px;background:#f0f7fc;border-left:3px solid #1473a5;'
+                f'border-radius:5px;margin:10px 0"><strong style="color:#075985">Nhận xét Trainer</strong>'
+                f'<div style="margin-top:8px;line-height:1.6;color:#263445">{h(feedback)}</div></div>'
             )
         sections.append(
-            f'<div style="border:1px solid #e2e8f0;border-radius:10px;padding:18px 16px;'
-            f'margin:18px 0;background:#ffffff">'
-            f'<h3 style="margin:0 0 14px;color:#123b70;font-size:17px;line-height:1.45">'
+            f'<div style="border:1px solid #e2e8f0;border-radius:8px;padding:12px 10px;overflow-wrap:anywhere;'
+            f'margin:10px 0;background:#ffffff">'
+            f'<h3 style="margin:0 0 10px;color:#123b70;font-size:17px;line-height:1.4">'
             f'Câu {i}. {h(r.get("Câu hỏi"))}</h3>{detail}</div>'
         )
+
     review_html = ""
     if repeat_alerts:
         review_items = "".join(
@@ -1017,24 +1045,24 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             for item in repeat_alerts
         )
         review_html = (
-            '<div style="padding:16px;background:#fff7ed;border:1px solid #fdba74;'
-            'border-radius:8px;margin:16px 0;line-height:1.6">'
+            '<div style="padding:12px;background:#fff7ed;border:1px solid #fdba74;'
+            'border-radius:8px;margin:10px 0;line-height:1.5">'
             '<strong style="color:#9a3412">Kiến thức cần ưu tiên ôn tập</strong>'
-            '<p>Những câu hỏi đã trả lời nhiều lần nhưng lần gần nhất vẫn chưa đạt:</p>'
+            '<p style="margin:6px 0">Những câu hỏi đã trả lời nhiều lần nhưng lần gần nhất vẫn chưa đạt:</p>'
             '<ol style="padding-left:20px;margin:8px 0">' + review_items + '</ol></div>'
         )
 
     html_body = (
-        '<html><body style="margin:0;padding:24px 12px;background:#f5f7fb;'
+        '<html><body style="margin:0;padding:6px 2px;background:#f5f7fb;width:100%;box-sizing:border-box;overflow-wrap:anywhere;'
         'font-family:Arial,Helvetica,sans-serif;color:#1e293b">'
-        '<div style="max-width:720px;margin:auto">'
-        '<div style="background:#123b70;color:white;padding:24px;border-radius:10px">'
-        f'<h1 style="font-size:22px;margin:0 0 12px;color:white">BÁO CÁO HỌC TẬP - NGÀY {selected_day}</h1>'
+        '<div style="width:100%;max-width:720px;margin:0 auto">'
+        '<div style="background:#123b70;color:white;padding:16px 12px;border-radius:8px">'
+        f'<h1 style="font-size:20px;margin:0 0 8px;color:white">BÁO CÁO HỌC TẬP - NGÀY {selected_day}</h1>'
         f'<div style="font-size:16px">Học viên: <strong>{h(student)}</strong></div>'
         f'<div style="font-size:15px;margin-top:6px">Đại lý: <strong>{h(dealer)}</strong></div>'
         f'<div style="font-size:19px;margin-top:10px">Điểm: <strong>{earned:g}/{maximum:g}</strong></div>'
         '</div>'
-        '<div style="padding:16px;background:#eaf2fc;border-radius:8px;margin:16px 0;line-height:1.6">'
+        '<div style="padding:10px;background:#eaf2fc;border-radius:8px;margin:10px 0;line-height:1.5">'
         '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
         'các câu chưa đạt (điểm dưới 60%), đối chiếu đáp án Trainer để làm tốt hơn.</div>'
         + review_html + "".join(sections) + '</div></body></html>'
@@ -1134,6 +1162,13 @@ def report_number(value):
         return float(str(value or "0").replace(",", "."))
     except (ValueError, TypeError):
         return 0.0
+
+def score_percent(score, maximum):
+    maximum_value = report_number(maximum)
+    return round(report_number(score) / maximum_value * 100) if maximum_value else 0
+
+def score_result(score, maximum):
+    return "Đạt" if is_passed(report_number(score), maximum) else "Chưa đạt"
 
 def show_student_report(student, selected_day, history):
     """Read final values from Câu trả lời; never expose Trainer action plans."""
@@ -1524,7 +1559,7 @@ def repeated_unpassed_questions(history, students):
             "Số lần trả lời": len(attempts), "Số lần chưa đạt": len(failed),
             "Ngày đánh giá": " → ".join(norm(r.get("Ngày đánh giá")) for r in attempts),
             "Điểm từng lần": " → ".join(
-                f'{norm(effective_score(r))}/{norm(r.get("Điểm tối đa"))}' for r in attempts),
+                f'{score_percent(effective_score(r), r.get("Điểm tối đa"))}%' for r in attempts),
             "Kết luận từng lần": " → ".join(norm(r.get("Kết luận")) for r in attempts),
         })
     return sorted(warnings, key=lambda r: (-r["Số lần chưa đạt"], r["Học viên"], r["Question ID"]))
