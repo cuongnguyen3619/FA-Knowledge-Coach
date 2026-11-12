@@ -1968,7 +1968,7 @@ if exam["status"] == "taking":
                     selected = [selected] if selected else []
                 responses[item["id"]] = ",".join(sorted(selected))
             else:
-                responses[item["id"]] = st.text_area("Câu trả lời", key=f"{key}:{item['id']}", height=120)
+                responses[item["id"]] = st.text_area("Câu trả lời", key=f"{key}:{item['id']}", height=240)
         submitted = st.form_submit_button("Nộp bài kiểm tra", type="primary")
     if submitted:
         try:
