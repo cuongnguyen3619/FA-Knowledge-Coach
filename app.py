@@ -1062,6 +1062,10 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
                           f"Điểm: {score_percent(score, maximum_score)}% – {score_result(score, maximum_score)}",
                           f"Nhận xét: {norm(fb.get('feedback'))}", ""])
 
+    lines.extend(["",
+                  "Cảm ơn bạn đã hoàn thành bài kiểm tra hằng ngày.",
+                  "Chúc bạn may mắn!"])
+
     # HTML email: readable on Gmail/mobile; text/plain remains as fallback.
     from html import escape as html_escape
     def h(value):
@@ -1133,6 +1137,13 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
             '<ol style="padding-left:20px;margin:8px 0">' + review_items + '</ol></div>'
         )
 
+    closing_html = (
+        '<div style="padding:14px 12px;margin:12px 0 0;background:#ffffff;border-radius:8px;'
+        'line-height:1.6;color:#334155">'
+        'Cảm ơn bạn đã hoàn thành bài kiểm tra hằng ngày.<br>'
+        'Chúc bạn may mắn!'
+        '</div>'
+    )
     html_body = (
         '<html><body style="margin:0;padding:6px 2px;background:#f5f7fb;width:100%;box-sizing:border-box;overflow-wrap:anywhere;'
         'font-family:Arial,Helvetica,sans-serif;color:#1e293b">'
@@ -1146,7 +1157,7 @@ def send_report_email(recipient, student, dealer, selected_day, rows):
         '<div style="padding:10px;background:#eaf2fc;border-radius:8px;margin:10px 0;line-height:1.5">'
         '<strong>Khuyến nghị:</strong> Xem chi tiết phần nhận xét của Trainer, '
         'các câu chưa đạt (điểm dưới 60%), đối chiếu đáp án Trainer để làm tốt hơn.</div>'
-        + review_html + "".join(sections) + '</div></body></html>'
+        + review_html + "".join(sections) + closing_html + '</div></body></html>'
     )
     message = EmailMessage()
     message["Subject"] = f"FA Knowledge Coach - Báo cáo Ngày {selected_day} - {student}"
