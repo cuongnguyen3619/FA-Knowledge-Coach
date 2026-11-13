@@ -598,6 +598,49 @@ def wait_for_sheet_rows(ws, predicate, attempts=6):
     return latest
 
 
+def dedupe_identical_session_rows(ws, values, sid):
+    """Keep one raw row for an identical duplicate in the same session."""
+    grouped = {}
+    for row_number, row in enumerate(values[1:], 2):
+        if row and row[0] == sid and len(row) > 3:
+            grouped.setdefault(row[3], []).append((row_number, row))
+
+    delete_rows = []
+    conflicts = []
+    deleted_qids = set()
+    for qid, entries in grouped.items():
+        if len(entries) < 2:
+            continue
+        signatures = {tuple(str(v or "") for v in entry[1][:9]) for entry in entries}
+        if len(signatures) == 1:
+            delete_rows.extend(row_number for row_number, _ in entries[1:])
+            deleted_qids.add(qid)
+        else:
+            conflicts.append(qid)
+
+    if delete_rows:
+        requests = [{
+            "deleteDimension": {
+                "range": {
+                    "sheetId": ws.id,
+                    "dimension": "ROWS",
+                    "startIndex": row_number - 1,
+                    "endIndex": row_number,
+                }
+            }
+        } for row_number in sorted(delete_rows, reverse=True)]
+        ws.spreadsheet.batch_update({"requests": requests})
+        values = wait_for_sheet_rows(
+            ws,
+            lambda rows: all(
+                sum(1 for row in rows[1:]
+                    if row and row[0] == sid and len(row) > 3 and row[3] == qid) == 1
+                for qid in deleted_qids
+            ),
+        )
+    return values, conflicts
+
+
 def save_raw_answers(sid, student, selected_day, order, bank, responses):
     """Persist and verify A:I before any AI call; never overwrite existing raw answers."""
     ws = sheet("Câu trả lời")
@@ -608,6 +651,13 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
                 "Ngày khóa học", "Module", "Level", "Câu hỏi", "Nội dung trả lời học viên"]
     if headers[:9] != expected:
         raise RuntimeError("Cấu trúc A:I của tab Câu trả lời đã thay đổi; dừng để bảo vệ dữ liệu.")
+    values, conflicts = dedupe_identical_session_rows(ws, values, sid)
+    if conflicts:
+        raise RuntimeError(
+            "Có Question ID trùng nhưng nội dung khác: "
+            + ", ".join(conflicts)
+            + ". Trainer cần kiểm tra."
+        )
     existing = {}
     for idx, row in enumerate(values[1:], 2):
         if row and row[0] == sid and len(row) > 3:
@@ -672,7 +722,7 @@ def queue_submission(sid, student, selected_day, order, status="Chờ chấm"):
         raise RuntimeError("Session ID trùng trong Bài kiểm tra.")
     if matches:
         row_num, row = matches[0]
-        if len(row) > 3 and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm"):
+        if len(row) > 3 and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm", "Cần Trainer kiểm tra"):
             return
         raise RuntimeError("Trạng thái bài kiểm tra chưa hợp lệ.")
     data = [sid, student, selected_day, status, timestamp(), "",
@@ -680,10 +730,10 @@ def queue_submission(sid, student, selected_day, order, status="Chờ chấm"):
     append_data_rows(ws, [data])
     confirmed = wait_for_sheet_rows(ws, lambda rows: sum(
         1 for row in rows[1:] if row and row[0] == sid and len(row) > 3
-        and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm")
+        and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm", "Cần Trainer kiểm tra")
     ) == 1)
     if sum(1 for row in confirmed[1:] if row and row[0] == sid and len(row) > 3
-           and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm")) != 1:
+           and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm", "Cần Trainer kiểm tra")) != 1:
         raise RuntimeError("Chưa xác nhận dòng bài kiểm tra.")
     invalidate_records()
 
@@ -1716,13 +1766,25 @@ if mode.startswith("Trainer"):
         batch = st.session_state.get(batch_key)
         if batch is None:
             course_start, course_end = course_date_range()
-            pending = [r for r in records("Bài kiểm tra")
+            assignment_rows = records("Bài kiểm tra")
+            pending = [r for r in assignment_rows
                        if norm(r.get("Ngày")) == str(selected_day)
                        and norm(r.get("Trạng thái")) == "Chờ chấm"
                        and within_course_period(
                            norm(r.get("Bắt đầu")) or norm(r.get("Cập nhật lúc")),
                            course_start, course_end)]
+            issues = [r for r in assignment_rows
+                      if norm(r.get("Ngày")) == str(selected_day)
+                      and norm(r.get("Trạng thái")) == "Cần Trainer kiểm tra"
+                      and within_course_period(
+                          norm(r.get("Bắt đầu")) or norm(r.get("Cập nhật lúc")),
+                          course_start, course_end)]
             st.metric("Bài chờ chấm", len(pending))
+            if issues:
+                st.warning(
+                    "Có dữ liệu cần Trainer kiểm tra: "
+                    + ", ".join(norm(r.get("Học viên")) for r in issues)
+                )
             if st.button("Chấm điểm", type="primary", disabled=not pending):
                 invalidate_records("Question Bank - L1", "Question Bank - L2/3/4", "Quy tắc đánh giá", "Câu trả lời", "Bài kiểm tra", "Lượt đánh giá")
                 st.session_state[batch_key] = {"action": "grade", "queue": pending, "index": 0, "successes": [], "failures": []}
@@ -1954,6 +2016,9 @@ st.subheader(f"Bài đánh giá – Ngày {selected_day}")
 key = f"exam_v6:{student}:{selected_day}"
 if key not in st.session_state:
     existing = assignment_row(student, selected_day, assignments)
+    if existing and norm(existing.get("Trạng thái")) == "Cần Trainer kiểm tra":
+        st.error("Bài đã lưu nhưng có dữ liệu trùng khác nội dung. Trainer cần kiểm tra trước khi chấm.")
+        st.stop()
     if existing and norm(existing.get("Trạng thái")) == "Đang lưu":
         sid = norm(existing.get("Session ID"))
         order = json.loads(existing.get("Danh sách câu JSON") or "[]")
@@ -2060,8 +2125,16 @@ if exam["status"] == "raw_saving":
             exam["status"] = "queued"
             st.rerun()
         except Exception as exc:
+            if "nội dung khác" in str(exc) or "trùng Question ID" in str(exc):
+                try:
+                    update_assignment(exam["sid"], **{
+                        "Trạng thái": "Cần Trainer kiểm tra",
+                        "Cập nhật lúc": timestamp(),
+                    })
+                except Exception:
+                    pass
             st.error(f"Chưa xác nhận lưu bài: {exc}")
-            st.warning("Không đóng trang. Bấm thử lại để xác minh hoặc tiếp tục lưu.")
+            st.warning("Trainer đã được đánh dấu cần kiểm tra nếu dữ liệu có xung đột.")
             if st.button("Thử lưu lại câu trả lời"):
                 st.rerun()
     st.stop()
