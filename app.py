@@ -118,6 +118,12 @@ def sheets_budget():
     return SheetsRequestBudget()
 
 
+@st.cache_resource(show_spinner=False)
+def submission_lock():
+    """Serialize a learner's save sequence so double-clicks cannot append duplicate rows."""
+    return threading.Lock()
+
+
 class BudgetedSheetsHTTPClient(gspread.HTTPClient):
     def request(self, method, endpoint, *args, **kwargs):
         # Covers metadata, reads, writes and calls not wrapped in retry_sheets.
@@ -580,6 +586,18 @@ def append_data_rows(ws, rows):
     }}]})
 
 
+def wait_for_sheet_rows(ws, predicate, attempts=6):
+    """Read back an append until Sheets has made the write visible."""
+    latest = []
+    for attempt in range(attempts):
+        latest = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
+        if predicate(latest):
+            return latest
+        if attempt < attempts - 1:
+            time.sleep(min(0.5 * (2 ** attempt), 4))
+    return latest
+
+
 def save_raw_answers(sid, student, selected_day, order, bank, responses):
     """Persist and verify A:I before any AI call; never overwrite existing raw answers."""
     ws = sheet("Câu trả lời")
@@ -615,7 +633,17 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
                          level(q), q.get("Câu hỏi", ""), responses[item["id"]]])
         append_data_rows(ws, rows)
     # Read-after-write verification, including every original answer.
-    check = retry_sheets(lambda: ws.get_all_values(value_render_option="UNFORMATTED_VALUE"))
+    def complete(values):
+        found = {}
+        for row in values[1:]:
+            if row and row[0] == sid and len(row) > 3:
+                found.setdefault(row[3], []).append(row)
+        return set(found) == set(ids) and all(
+            len(found[qid]) == 1 and len(found[qid][0]) >= 9
+            and found[qid][0][8] == responses[qid] for qid in ids
+        )
+
+    check = wait_for_sheet_rows(ws, complete)
     found = {}
     for row in check[1:]:
         if row and row[0] == sid and len(row) > 3:
@@ -635,8 +663,8 @@ def save_raw_answers(sid, student, selected_day, order, bank, responses):
     invalidate_records()
     return True
 
-def queue_submission(sid, student, selected_day, order):
-    """Durably mark an exam as submitted; grading runs later in Trainer mode."""
+def queue_submission(sid, student, selected_day, order, status="Chờ chấm"):
+    """Create or confirm the assignment row; safe to call again after an uncertain write."""
     ws = sheet("Bài kiểm tra")
     values = retry_sheets(lambda: ws.get_all_values())
     matches = [(i, row) for i, row in enumerate(values[1:], 2) if row and row[0] == sid]
@@ -644,16 +672,19 @@ def queue_submission(sid, student, selected_day, order):
         raise RuntimeError("Session ID trùng trong Bài kiểm tra.")
     if matches:
         row_num, row = matches[0]
-        if len(row) > 3 and row[3] in ("Chờ chấm", "Hoàn thành"):
+        if len(row) > 3 and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm"):
             return
         raise RuntimeError("Trạng thái bài kiểm tra chưa hợp lệ.")
-    data = [sid, student, selected_day, "Chờ chấm", timestamp(), timestamp(),
+    data = [sid, student, selected_day, status, timestamp(), "",
             json.dumps(order, ensure_ascii=False), 13, len(order)-13, "", 32, timestamp()]
     append_data_rows(ws, [data])
-    confirmed = retry_sheets(lambda: ws.get_all_values())
+    confirmed = wait_for_sheet_rows(ws, lambda rows: sum(
+        1 for row in rows[1:] if row and row[0] == sid and len(row) > 3
+        and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm")
+    ) == 1)
     if sum(1 for row in confirmed[1:] if row and row[0] == sid and len(row) > 3
-           and row[3] == "Chờ chấm") != 1:
-        raise RuntimeError("Chưa xác nhận trạng thái Chờ chấm.")
+           and row[3] in ("Đang lưu", "Chờ chấm", "Hoàn thành", "Đã chấm")) != 1:
+        raise RuntimeError("Chưa xác nhận dòng bài kiểm tra.")
     invalidate_records()
 
 
@@ -1923,6 +1954,24 @@ st.subheader(f"Bài đánh giá – Ngày {selected_day}")
 key = f"exam_v6:{student}:{selected_day}"
 if key not in st.session_state:
     existing = assignment_row(student, selected_day, assignments)
+    if existing and norm(existing.get("Trạng thái")) == "Đang lưu":
+        sid = norm(existing.get("Session ID"))
+        order = json.loads(existing.get("Danh sách câu JSON") or "[]")
+        invalidate_records("Câu trả lời")
+        saved_rows = retry_sheets(lambda: records("Câu trả lời"))
+        recovered = {}
+        for row in saved_rows:
+            if norm(row.get("Session ID")) == sid and norm(row.get("Question ID")) not in recovered:
+                recovered[norm(row.get("Question ID"))] = norm(row.get("Nội dung trả lời học viên"))
+        expected_ids = [item["id"] for item in order]
+        if expected_ids and all(recovered.get(qid, "") for qid in expected_ids):
+            st.session_state[key] = {
+                "sid": sid, "order": order, "status": "raw_saving",
+                "results": None, "responses": {qid: recovered[qid] for qid in expected_ids}
+            }
+            st.rerun()
+        st.warning("Bài đã được tạo nhưng chưa lưu đủ câu trả lời. Vui lòng giữ nguyên trang và thử lại.")
+        st.stop()
     if existing and norm(existing.get("Trạng thái")) in ("Chờ chấm", "Đã chấm", "Đã phân loại", "Hoàn thành"):
         sid = norm(existing.get("Session ID"))
         order = json.loads(existing.get("Danh sách câu JSON") or "[]")
@@ -1997,8 +2046,17 @@ if exam["status"] == "taking":
 if exam["status"] == "raw_saving":
     with st.spinner("Đang lưu và xác minh câu trả lời gốc..."):
         try:
-            save_raw_answers(exam["sid"], student, selected_day, order, bank, exam["responses"])
-            queue_submission(exam["sid"], student, selected_day, order)
+            # Create the assignment first, then persist answers. This prevents
+            # raw answers from becoming invisible to the Trainer if the second
+            # write is interrupted.
+            with submission_lock():
+                queue_submission(exam["sid"], student, selected_day, order, status="Đang lưu")
+                save_raw_answers(exam["sid"], student, selected_day, order, bank, exam["responses"])
+                update_assignment(exam["sid"], **{
+                    "Trạng thái": "Chờ chấm",
+                    "Kết thúc": timestamp(),
+                    "Cập nhật lúc": timestamp(),
+                })
             exam["status"] = "queued"
             st.rerun()
         except Exception as exc:
